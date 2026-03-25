@@ -198,7 +198,11 @@ def parse_plan(file_bytes):
         })
     return courses, returns
 
-file_bytes = plan_file.read()
+if isinstance(plan_file, str):
+    with open(plan_file, "rb") as f:
+        file_bytes = f.read()
+else:
+    file_bytes = plan_file.read()
 courses, returns = parse_plan(file_bytes)
 
 # ── Google Sheets 데이터 로드 (또는 session_state) ──
