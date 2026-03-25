@@ -358,10 +358,10 @@ with tab0:
         )
 
 # ══════════════════════════════════════════════
-# TAB 1 : 모집현황 입력
+# TAB 1 : 모집현황 입력 (직접 입력 폼)
 # ══════════════════════════════════════════════
 with tab1:
-    st.markdown("#### 메신저 보고 텍스트 → 자동 파싱")
+    st.markdown("#### 주차별 모집현황 입력")
 
     if not sheet:
         st.warning(
@@ -370,238 +370,159 @@ with tab1:
             icon="⚠️",
         )
 
-    # ── 정규식 파서 ──────────────────────────────
-    def _extract_num(text, patterns):
-        for pat in patterns:
-            m = re.search(pat, text, re.IGNORECASE)
-            if m:
-                return int(m.group(1))
-        return 0
+    # ── 주차 / 계열 / 지점 선택 ──────────────────
+    SERIES_OPTS = ["— 계열 선택 —", "IT", "컴퓨터", "게임", "뷰티", "요리", "승무원"]
+    hdr1, hdr2, hdr3 = st.columns([1, 1, 2])
+    with hdr1:
+        week_label = st.text_input("기준 주차", placeholder="예: 3월3주",
+                                   value=st.session_state.get("last_week",""))
+    with hdr2:
+        선택계열 = st.selectbox("계열 선택", SERIES_OPTS)
+    with hdr3:
+        입력지점 = st.text_input("지점명 입력", placeholder="예: 강남, 홍대, 신촌, 대구, 부산 등")
 
-    def parse_text(text, course_list):
-        blocks = re.split(r"\n{2,}|(?:^|\n)[─━=\-]{3,}(?:\n|$)", text.strip())
-        results = []
-        branch_names = sorted(set(c["지점"] for c in course_list if c["지점"]), key=len, reverse=True)
-        course_names = [c["과정명"] for c in course_list]
-
-        for block in blocks:
-            block = block.strip()
-            if not block or len(block) < 4:
-                continue
-
-            confirmed = _extract_num(block, [
-                r"확정\s*인원?\s*[:\-]?\s*(\d+)",
-                r"(\d+)\s*명?\s*확정",
-                r"확정\s*(\d+)\s*명?",
-                r"[\/|]\s*(\d+)\s*명?\s*(확정|confi)",
-            ])
-            applied = _extract_num(block, [
-                r"신청\s*인원?\s*[:\-]?\s*(\d+)",
-                r"(\d+)\s*명?\s*신청",
-                r"신청\s*(\d+)\s*명?",
-            ])
-
-            # 개설상태
-            if re.search(r"폐강|취소|미개설", block):
-                status = "폐강"
-            elif re.search(r"연기|다음\s*달|다음달|\d월\s*개강|\d월로", block):
-                status = "개강연기"
-            else:
-                status = "개강확정"
-
-            # 연기사유
-            reason = ""
-            if status == "개강연기":
-                m = re.search(r"(?:연기|연기됨|연기예정)\s*[-:·]?\s*(.{2,30}?)(?:\n|$)", block)
-                if m:
-                    reason = m.group(1).strip()
-
-            # 지점 감지
-            found_branch = ""
-            for bn in branch_names:
-                if bn in block:
-                    found_branch = bn
-                    break
-
-            # 과정명 퍼지 매칭
-            lines = [l.strip() for l in block.split("\n") if l.strip()]
-            name_cand = ""
-            for line in lines:
-                if not re.search(r"확정|신청|폐강|연기|개강|\d+명|지점|보고", line):
-                    name_cand = line
-                    break
-            if not name_cand:
-                name_cand = lines[0] if lines else ""
-
-            matches = difflib.get_close_matches(name_cand, course_names, n=3, cutoff=0.25)
-
-            if confirmed > 0 or applied > 0 or status != "개강확정":
-                results.append({
-                    "원문_요약": (block[:60] + "…") if len(block) > 60 else block,
-                    "과정명_후보": matches[0] if matches else name_cand,
-                    "과정명_후보목록": matches,
-                    "지점": found_branch,
-                    "확정인원": confirmed,
-                    "신청인원": applied,
-                    "개설상태": status,
-                    "연기사유": reason,
-                    "비고": "",
-                })
-        return results
-
-    # ── 입력 UI ──────────────────────────────────
-    col_l, col_r = st.columns([3, 2])
-    with col_l:
-        week_label = st.text_input("기준 주차", placeholder="예: 3월3주")
-        msg_text   = st.text_area(
-            "메신저 텍스트 붙여넣기", height=280,
-            placeholder=(
-                "예시)\n"
-                "대구 BIM 실내건축설계 인테리어 양성과정\n"
-                "확정 19명 / 신청 20명\n"
-                "개강확정\n"
-                "\n"
-                "강남 AI 활용 소프트웨어 과정\n"
-                "확정 8명 / 신청 12명\n"
-                "개강연기 - 강의장 미확보\n"
-                "\n"
-                "수원 게임기획 실무자 양성과정\n"
-                "확정 0명 / 신청 0명\n"
-                "폐강"
-            ),
-        )
-        parse_btn = st.button("🔍 자동 파싱", type="primary", use_container_width=True)
-
-    with col_r:
-        st.markdown("**지원 텍스트 형식**")
-        st.info(
-            "📌 **빈 줄**로 과정을 구분하세요\n\n"
-            "✅ `확정 N명 / 신청 N명`\n"
-            "✅ `확정인원: N`\n"
-            "✅ `N명 확정`\n\n"
-            "🔄 개강연기 키워드 인식:\n"
-            "`연기`, `다음달`, `X월 개강`\n\n"
-            "✖ 폐강 키워드 인식:\n"
-            "`폐강`, `취소`, `미개설`"
-        )
-
-    if parse_btn and msg_text.strip():
-        parsed = parse_text(msg_text, courses)
-        if parsed:
-            st.session_state["parsed"] = parsed
-            st.session_state["parse_week"] = week_label
-            st.success(f"**{len(parsed)}개 과정** 파싱 완료! 아래에서 확인 후 저장하세요.")
+    if 선택계열 == "— 계열 선택 —" or not 입력지점.strip():
+        st.info("계열을 선택하고 지점명을 입력하면 해당 과정 목록이 표시됩니다.")
+    else:
+        선택지점 = 입력지점.strip()
+        # 계열과 지점으로 필터 (계열 부분 일치, 지점 부분 일치)
+        지점과정 = [
+            c for c in courses
+            if 선택계열 in (c.get("계열") or "")
+            and 선택지점 in (c.get("지점") or "")
+        ]
+        # 계열 일치 없으면 지점만으로 재시도
+        if not 지점과정:
+            지점과정 = [c for c in courses if 선택지점 in (c.get("지점") or "")]
+        if not 지점과정:
+            st.warning(f"'{선택지점}' 지점의 과정이 연간계획에 없습니다.")
         else:
-            st.warning("파싱된 데이터가 없습니다. 텍스트 형식을 확인해주세요.")
+            # 상태 아이콘 색 구분 설명
+            st.caption(f"✅ 개강확정  🔄 개강연기  ✖ 폐강  |  총 {len(지점과정)}개 과정")
+            st.markdown("---")
 
-    # ── 파싱 결과 편집 & 저장 ────────────────────
-    if "parsed" in st.session_state and st.session_state["parsed"]:
-        st.markdown("---")
-        st.markdown("#### 파싱 결과 확인")
-        st.caption("과정명이 틀리면 드롭다운에서 직접 선택해주세요.")
+            STATE_OPTS = ["개강확정", "개강연기", "폐강"]
+            입력결과 = []
 
-        all_course_opts = [f"{c['지점']} | {c['과정명']}" for c in courses]
-        edited_items = []
+            for i, c in enumerate(지점과정):
+                key_c = course_key(c["지점"], c["과정명"], c.get("운영회차","1"))
+                ex = db.get(key_c, {})
 
-        for i, item in enumerate(st.session_state["parsed"]):
-            icon = "✅" if item["개설상태"] == "개강확정" else \
-                   "🔄" if item["개설상태"] == "개강연기" else "✖"
-            with st.expander(f"{icon} [{i+1}] {item['과정명_후보']} — {item['개설상태']}", expanded=True):
-                st.caption(f"원문: {item['원문_요약']}")
-                rc1, rc2, rc3 = st.columns(3)
+                # 현재 상태 아이콘
+                cur_state = ex.get("개설상태", "개강확정")
+                icon = "✅" if cur_state == "개강확정" else \
+                       "🔄" if cur_state == "개강연기" else \
+                       "✖" if cur_state == "폐강" else "⬜"
 
-                with rc1:
-                    # 후보 목록으로 기본값 설정
-                    default_opt = next(
-                        (o for o in all_course_opts
-                         if item["과정명_후보"] in o or
-                         any(m in o for m in item.get("과정명_후보목록", []))),
-                        all_course_opts[0] if all_course_opts else ""
+                date_str = ""
+                if c.get("시작일") and c.get("종료일"):
+                    try:
+                        s = c["시작일"].strftime("%m/%d") if hasattr(c["시작일"], "strftime") else str(c["시작일"])[:5]
+                        e = c["종료일"].strftime("%m/%d") if hasattr(c["종료일"], "strftime") else str(c["종료일"])[:5]
+                        date_str = f" ({s}~{e})"
+                    except Exception:
+                        pass
+
+                with st.expander(
+                    f"{icon}  **{c['과정명']}**  —  정원 {c['정원']}명{date_str}",
+                    expanded=(cur_state != "개강확정" or not ex)
+                ):
+                    c1, c2, c3 = st.columns([1, 1, 2])
+                    with c1:
+                        확정 = st.number_input(
+                            "확정인원", min_value=0,
+                            value=int(ex.get("확정인원", 0) or 0),
+                            key=f"cf1_{i}"
+                        )
+                        신청 = st.number_input(
+                            "신청인원", min_value=0,
+                            value=int(ex.get("신청인원", 0) or 0),
+                            key=f"ap1_{i}"
+                        )
+                    with c2:
+                        정원 = c["정원"] or 1
+                        모집률 = 확정 / 정원 * 100
+                        신청률 = 신청 / 정원 * 100
+                        mr_color = "red" if 모집률 < 65 else "green"
+                        sr_color = "red" if 신청률 < 70 else "green"
+                        st.markdown(
+                            f"<br><span style='color:{mr_color};font-weight:700'>모집률 {모집률:.0f}%</span><br>"
+                            f"<span style='color:{sr_color};font-weight:700'>신청률 {신청률:.0f}%</span>",
+                            unsafe_allow_html=True
+                        )
+                    with c3:
+                        state_idx = STATE_OPTS.index(cur_state) if cur_state in STATE_OPTS else 0
+                        상태 = st.selectbox(
+                            "개설상태", STATE_OPTS,
+                            index=state_idx, key=f"st1_{i}"
+                        )
+                        사유 = st.text_input(
+                            "연기/폐강 사유",
+                            value=ex.get("연기사유", ""),
+                            key=f"rs1_{i}",
+                            placeholder="연기 또는 폐강 사유 입력"
+                        )
+
+                    비고 = st.text_input(
+                        "비고", value=ex.get("모집비고", ""),
+                        key=f"nt1_{i}", placeholder="기타 메모"
                     )
-                    matched = st.selectbox(
-                        "연간계획 과정 매칭",
-                        all_course_opts,
-                        index=all_course_opts.index(default_opt) if default_opt in all_course_opts else 0,
-                        key=f"sel_{i}",
-                    )
-                with rc2:
-                    confirmed = st.number_input("확정인원", value=item["확정인원"],
-                                                min_value=0, key=f"con_{i}")
-                    applied   = st.number_input("신청인원", value=item["신청인원"],
-                                                min_value=0, key=f"app_{i}")
-                with rc3:
-                    state = st.selectbox(
-                        "개설상태",
-                        ["개강확정","개강연기","폐강"],
-                        index=["개강확정","개강연기","폐강"].index(item["개설상태"]),
-                        key=f"sta_{i}",
-                    )
-                    reason = st.text_input("연기사유", value=item["연기사유"], key=f"rsn_{i}")
 
-                note = st.text_input("비고", value=item["비고"], key=f"nte_{i}")
+                    입력결과.append({
+                        "course": c, "key": key_c,
+                        "확정": 확정, "신청": 신청,
+                        "모집률": round(확정 / 정원, 4) if 정원 > 0 else 0,
+                        "신청률": round(신청 / 정원, 4) if 정원 > 0 else 0,
+                        "상태": 상태, "사유": 사유, "비고": 비고,
+                    })
 
-                matched_c = next(
-                    (c for c in courses if f"{c['지점']} | {c['과정명']}" == matched), None
-                )
-                정원 = matched_c["정원"] if matched_c else 1
-                모집률 = confirmed / 정원 if 정원 > 0 else 0
-                신청률 = applied  / 정원 if 정원 > 0 else 0
-
-                edited_items.append({
-                    "course": matched_c,
-                    "confirmed": confirmed, "applied": applied,
-                    "모집률": 모집률, "신청률": 신청률,
-                    "state": state, "reason": reason, "note": note,
-                })
-
-        if st.button("💾 저장", type="primary", use_container_width=True):
-            week = st.session_state.get("parse_week","")
-            saved = 0
-            for item in edited_items:
-                c = item["course"]
-                if not c:
-                    continue
-                key = course_key(c["지점"], c["과정명"], c.get("운영회차","1"))
-                record = {
-                    "key": key,
-                    "계열": c["계열"], "지점": c["지점"],
-                    "훈련종류": c["훈련종류"], "과정명": c["과정명"],
-                    "시작일": c["시작일"], "종료일": c["종료일"],
-                    "정원": c["정원"],
-                    "기준주차": week,
-                    "확정인원": item["confirmed"],
-                    "신청인원": item["applied"],
-                    "모집률": round(item["모집률"], 4),
-                    "신청률": round(item["신청률"], 4),
-                    "개설상태": item["state"],
-                    "연기사유": item["reason"],
-                    "모집비고": item["note"],
-                    # 기존 추적 데이터 유지
-                    "평가완료":   db.get(key, {}).get("평가완료",""),
-                    "평가완료일": db.get(key, {}).get("평가완료일",""),
-                    "평가비고":   db.get(key, {}).get("평가비고",""),
-                    "비용신청":   db.get(key, {}).get("비용신청",""),
-                    "비용금액":   db.get(key, {}).get("비용금액",""),
-                    "비용신청일": db.get(key, {}).get("비용신청일",""),
-                    "비용비고":   db.get(key, {}).get("비용비고",""),
-                    "취업_이수자":db.get(key, {}).get("취업_이수자",""),
-                    "취업_취업자":db.get(key, {}).get("취업_취업자",""),
-                    "취업_조사일":db.get(key, {}).get("취업_조사일",""),
-                    "취업비고":   db.get(key, {}).get("취업비고",""),
-                    "만족도점수": db.get(key, {}).get("만족도점수",""),
-                    "만족도조사일":db.get(key,{}).get("만족도조사일",""),
-                    "만족도비고": db.get(key, {}).get("만족도비고",""),
-                    "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                }
-                save_record(key, record)
-                if not sheet:
-                    st.session_state.local_db[key] = record
-                db[key] = record
-                saved += 1
-
-            st.success(f"✅ {saved}개 과정 저장 완료!")
-            del st.session_state["parsed"]
-            st.rerun()
+            st.markdown("---")
+            if st.button("💾 전체 저장", type="primary", use_container_width=True):
+                if not week_label.strip():
+                    st.error("기준 주차를 입력해주세요 (예: 3월3주)")
+                else:
+                    saved = 0
+                    for item in 입력결과:
+                        c = item["course"]
+                        k = item["key"]
+                        record = {
+                            "key": k,
+                            "계열": c["계열"], "지점": c["지점"],
+                            "훈련종류": c["훈련종류"], "과정명": c["과정명"],
+                            "시작일": str(c["시작일"]), "종료일": str(c["종료일"]),
+                            "정원": c["정원"],
+                            "기준주차": week_label.strip(),
+                            "확정인원": item["확정"],
+                            "신청인원": item["신청"],
+                            "모집률": item["모집률"],
+                            "신청률": item["신청률"],
+                            "개설상태": item["상태"],
+                            "연기사유": item["사유"],
+                            "모집비고": item["비고"],
+                            "평가완료":    db.get(k, {}).get("평가완료",""),
+                            "평가완료일":  db.get(k, {}).get("평가완료일",""),
+                            "평가비고":    db.get(k, {}).get("평가비고",""),
+                            "비용신청":    db.get(k, {}).get("비용신청",""),
+                            "비용금액":    db.get(k, {}).get("비용금액",""),
+                            "비용신청일":  db.get(k, {}).get("비용신청일",""),
+                            "비용비고":    db.get(k, {}).get("비용비고",""),
+                            "취업_이수자": db.get(k, {}).get("취업_이수자",""),
+                            "취업_취업자": db.get(k, {}).get("취업_취업자",""),
+                            "취업_조사일": db.get(k, {}).get("취업_조사일",""),
+                            "취업비고":    db.get(k, {}).get("취업비고",""),
+                            "만족도점수":  db.get(k, {}).get("만족도점수",""),
+                            "만족도조사일":db.get(k, {}).get("만족도조사일",""),
+                            "만족도비고":  db.get(k, {}).get("만족도비고",""),
+                            "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        }
+                        save_record(k, record)
+                        if not sheet:
+                            st.session_state.local_db[k] = record
+                        db[k] = record
+                        saved += 1
+                    st.session_state["last_week"] = week_label.strip()
+                    st.success(f"✅ {saved}개 과정 저장 완료! ({선택지점} / {week_label})")
+                    st.rerun()
 
 # ══════════════════════════════════════════════
 # TAB 2 : 모집현황 조회
