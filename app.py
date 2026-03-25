@@ -9,6 +9,7 @@ import streamlit as st
 import openpyxl
 import pandas as pd
 import re
+import os
 import difflib
 from datetime import datetime
 from io import BytesIO
@@ -113,14 +114,23 @@ if sheet:
 else:
     st.sidebar.warning("Google Sheets 미연결\n\n데이터가 세션 내에서만 유지됩니다.", icon="⚠️")
 
-# ── 연간개설계획 파일 로드 ────────────────────────
+# ── 연간개설계획 파일 로드 (자동 또는 업로드) ────────
+AUTO_PLAN = "plan.xlsx.xlsx"  # GitHub에 올려둔 파일명
+
 with st.sidebar:
     st.markdown("### 📂 연간개설계획 파일")
-    plan_file = st.file_uploader(
-        "엑셀 업로드 (.xlsx)",
-        type=["xlsx", "XLSX"],
-        help="#251224 (취합) 26년 국비훈련 연간개설계획_3차.xlsx"
-    )
+    if os.path.exists(AUTO_PLAN):
+        st.success(f"✅ plan.xlsx 자동 로드됨", icon="📋")
+        plan_file = AUTO_PLAN
+        # 다른 파일로 교체 원할 때
+        override = st.file_uploader("다른 파일로 교체", type=["xlsx","XLSX"])
+        if override:
+            plan_file = override
+    else:
+        plan_file = st.file_uploader(
+            "엑셀 업로드 (.xlsx)",
+            type=["xlsx", "XLSX"],
+        )
 
 if not plan_file:
     st.info("👈 왼쪽 사이드바에서 연간개설계획 엑셀 파일을 업로드해주세요.")
