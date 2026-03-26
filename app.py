@@ -233,6 +233,249 @@ def serialize_비용단위기간(data):
     return ";".join(f"{k}|{'완료' if v['완료'] else '미신청'}|{v['금액']}"
                     for k, v in sorted(data.items()))
 
+# ── 메신저 파싱 헬퍼 함수들 ──────────────────────
+@st.cache_data(show_spinner=False)
+def parse_staff_file(file_bytes):
+    """지점 담당자 현황 파싱 → {이름: (계열, 지점)} 매핑"""
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    ws = wb.active
+    staff_map = {}
+    cur_dept = ""
+    for row in ws.iter_rows(min_row=5, values_only=True):
+        if not any(row):
+            continue
+        if row[1]:
+            cur_dept = str(row[1]).strip()
+        지역 = str(row[2] or "").strip()
+        성명 = str(row[3] or "").strip()
+        재직 = str(row[5] or "").strip().upper()
+        if 성명 and 지역 and 재직 != "X":
+            staff_map[성명] = (cur_dept, 지역)
+        담당자 = str(row[6] or "").strip()
+        담당재직 = str(row[8] or "").strip().upper()
+        if 담당자 and 지역 and 담당재직 != "X":
+            staff_map[담당자] = (cur_dept, 지역)
+    return staff_map
+
+def extract_branch_from_greeting(text):
+    """인사말에서 '계열+지점' 패턴 추출. 예: 'IT인천 모집현황' → ('IT','인천')"""
+    series_list = sorted(SERIES_BRANCHES.keys(), key=len, reverse=True)
+    all_branches = sorted(set(b for bl in SERIES_BRANCHES.values() for b in bl), key=len, reverse=True)
+    for ser in series_list:
+        for br in all_branches:
+            if (ser + br) in text:
+                return (ser, br)
+    for ser in series_list:
+        if ser in text and ("보고" in text or "현황" in text):
+            return (ser, "")
+    return ("", "")
+
+def extract_number(text_val):
+    """'13명', '(HRD...) : 9명', '00명' 등에서 숫자 추출"""
+    if not text_val:
+        return 0
+    text_val = str(text_val)
+    m = re.search(r'[：:]\s*(\d+)', text_val)
+    if m:
+        return int(m.group(1))
+    nums = re.findall(r'\d+', text_val)
+    if nums:
+        return int(nums[-1])
+    return 0
+
+def parse_date_range(text_val):
+    """기간 텍스트 → (시작일, 종료일) YYYY-MM-DD"""
+    if not text_val:
+        return "", ""
+    t = str(text_val).strip()
+    # 4자리 연도: 2026-03-20 ~ 2026-08-21 or 2026.03.20~2026.08.21
+    m = re.search(r'(\d{4}[-./]\d{1,2}[-./]\d{1,2})\s*~\s*(\d{4}[-./]\d{1,2}[-./]\d{1,2})', t)
+    if m:
+        def norm(d): return re.sub(r'[./]', '-', d)
+        return norm(m.group(1)), norm(m.group(2))
+    # 2자리 연도: 26.03.19~26.09.28
+    m = re.search(r'(\d{2}[./]\d{2}[./]\d{2})\s*~\s*(\d{2}[./]\d{2}[./]\d{2})', t)
+    if m:
+        def expand(d):
+            p = re.split(r'[./]', d)
+            return f"20{p[0]}-{p[1]}-{p[2]}"
+        return expand(m.group(1)), expand(m.group(2))
+    return "", ""
+
+def split_course_blocks(text):
+    """메신저 텍스트에서 과정 블록 분리"""
+    pat = re.compile(
+        r'(?:(?:^|\n)\s*\d+\s*[.·]\s*(?:과\s*정\s*명|과정명)\s*[:\：]|'
+        r'(?:^|\n)\s*\[\s*(?:과\s*정\s*명|과정명)\s*[:\：]|'
+        r'(?:^|\n)\s*(?:과\s*정\s*명|과정명)\s*[:\：])',
+        re.MULTILINE
+    )
+    positions = [m.start() for m in pat.finditer(text)]
+    if not positions:
+        return []
+    blocks = []
+    for i, pos in enumerate(positions):
+        end = positions[i+1] if i+1 < len(positions) else len(text)
+        blocks.append(text[pos:end].strip())
+    return blocks
+
+def parse_one_course(block):
+    """단일 과정 블록 → dict"""
+    result = {"과정명":"","시작일":"","종료일":"","훈련시간":"","강의장":"","모집인원":0,"신청인원":0,"확정인원":0}
+    for line in block.split('\n'):
+        line = line.strip().lstrip('-').lstrip('*').lstrip('·').strip()
+        if not line:
+            continue
+        m = re.search(r'(?:과\s*정\s*명|과정명)\s*[:\：]\s*(.*)', line)
+        if m:
+            name = m.group(1).strip()
+            name = re.sub(r'^\[', '', name).rstrip(']').strip()
+            result["과정명"] = name
+            continue
+        m = re.search(r'(?:훈련\s*기간|기\s*간)\s*[:\：]\s*(.*)', line)
+        if m:
+            s, e = parse_date_range(m.group(1))
+            result["시작일"] = s; result["종료일"] = e
+            continue
+        m = re.search(r'훈련\s*시간\s*[:\：]\s*(.*)', line)
+        if m:
+            result["훈련시간"] = m.group(1).strip()
+            continue
+        m = re.search(r'(?:강\s*의\s*[장실])\s*[:\：]\s*(.*)', line)
+        if m:
+            result["강의장"] = m.group(1).strip()
+            continue
+        m = re.search(r'(?:모집\s*인원|정\s*원)\s*[:\：]\s*(.*)', line)
+        if m:
+            result["모집인원"] = extract_number(m.group(1))
+            continue
+        m = re.search(r'신청\s*인원\s*[:\：]\s*(.*)', line)
+        if m:
+            result["신청인원"] = extract_number(m.group(1))
+            continue
+        m = re.search(r'확정\s*인원\s*[:\：]\s*(.*)', line)
+        if m:
+            result["확정인원"] = extract_number(m.group(1))
+            continue
+    return result
+
+def fuzzy_match_plan(course_name, branch, plan_courses):
+    """과정명+지점으로 연간개설계획 매칭"""
+    if not course_name:
+        return None
+    def normalize(s):
+        return re.sub(r'[\s\(\)\[\]&·]', '', str(s)).lower()
+    norm_q = normalize(course_name)
+    candidates = [c for c in plan_courses if branch and branch in (c.get("지점",""))] if branch else plan_courses
+    if not candidates:
+        candidates = plan_courses
+    for c in candidates:
+        if normalize(c["과정명"]) == norm_q:
+            return c
+    best, best_score = None, 0
+    for c in candidates:
+        score = difflib.SequenceMatcher(None, norm_q, normalize(c["과정명"])).ratio()
+        if score > best_score and score > 0.55:
+            best, best_score = c, score
+    return best
+
+def parse_messenger_all(text, staff_map, plan_courses):
+    """전체 메신저 텍스트 파싱 → 과정 데이터 리스트"""
+    results = []
+    name_pat = re.compile(r'^([가-힣]{2,4})$', re.MULTILINE)
+    matches = list(name_pat.finditer(text))
+    if not matches:
+        blocks = [("", text)]
+    else:
+        blocks = []
+        for i, m in enumerate(matches):
+            end = matches[i+1].start() if i+1 < len(matches) else len(text)
+            blocks.append((m.group(1), text[m.start():end]))
+    for name, block in blocks:
+        계열, 지점 = extract_branch_from_greeting(block)
+        if name in staff_map:
+            s_계, s_지 = staff_map[name]
+            if not 계열: 계열 = s_계
+            if not 지점: 지점 = s_지
+        for cb in split_course_blocks(block):
+            c = parse_one_course(cb)
+            if not c["과정명"]:
+                continue
+            plan = fuzzy_match_plan(c["과정명"], 지점, plan_courses)
+            정원 = c["모집인원"] or (int(plan.get("정원",0) or 0) if plan else 0)
+            확정 = c["확정인원"]
+            신청 = c["신청인원"]
+            results.append({
+                "보고자": name,
+                "계열": 계열 or (plan.get("계열","") if plan else ""),
+                "지점": 지점 or (plan.get("지점","") if plan else ""),
+                "훈련종류": plan.get("훈련종류","") if plan else "",
+                "과정명": c["과정명"],
+                "시작일": c["시작일"] or (plan.get("시작일","") if plan else ""),
+                "종료일": c["종료일"] or (plan.get("종료일","") if plan else ""),
+                "훈련일수": plan.get("훈련일수","") if plan else "",
+                "훈련시간": c["훈련시간"] or (plan.get("훈련시간","") if plan else ""),
+                "정원": 정원,
+                "확정인원": 확정,
+                "신청인원": 신청,
+                "모집률(%)": round(확정/정원*100, 1) if 정원 > 0 else 0,
+                "신청률(%)": round(신청/정원*100, 1) if 정원 > 0 else 0,
+                "강의장": c["강의장"],
+                "매칭과정명": plan.get("과정명","") if plan else "",
+                "비고": "",
+            })
+    return results
+
+def export_messenger_excel(rows, week_label):
+    """파싱 결과를 엑셀 보고 양식으로 출력"""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "모집현황"
+    ws.merge_cells("A1:O1")
+    ws["A1"] = f"26년 {week_label} 모집현황"
+    ws["A1"].font = Font(bold=True, size=13)
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 22
+    headers = ["계열","지점","훈련종류","훈련과정명","훈련일(일)","훈련시간","시작일","종료일","정원","확정인원","신청인원","모집률","신청률","강의장","비고"]
+    col_widths = [8, 8, 12, 50, 8, 18, 12, 12, 6, 8, 8, 8, 8, 12, 20]
+    for j, (h, w) in enumerate(zip(headers, col_widths), 1):
+        cell = ws.cell(row=2, column=j, value=h)
+        cell.font = Font(bold=True, color="FFFFFF", size=10)
+        cell.fill = PatternFill("solid", fgColor="1a365d")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.column_dimensions[cell.column_letter].width = w
+    ws.row_dimensions[2].height = 20
+    for i, r in enumerate(rows, 3):
+        ws.cell(row=i, column=1, value=r.get("계열",""))
+        ws.cell(row=i, column=2, value=r.get("지점",""))
+        ws.cell(row=i, column=3, value=r.get("훈련종류",""))
+        ws.cell(row=i, column=4, value=r.get("과정명",""))
+        ws.cell(row=i, column=5, value=r.get("훈련일수",""))
+        ws.cell(row=i, column=6, value=r.get("훈련시간",""))
+        ws.cell(row=i, column=7, value=r.get("시작일",""))
+        ws.cell(row=i, column=8, value=r.get("종료일",""))
+        ws.cell(row=i, column=9, value=r.get("정원",0))
+        ws.cell(row=i, column=10, value=r.get("확정인원",0))
+        ws.cell(row=i, column=11, value=r.get("신청인원",0))
+        mr = r.get("모집률(%)",0)
+        sr = r.get("신청률(%)",0)
+        c_mr = ws.cell(row=i, column=12, value=round(mr/100,4))
+        c_sr = ws.cell(row=i, column=13, value=round(sr/100,4))
+        c_mr.number_format = "0.0%"
+        c_sr.number_format = "0.0%"
+        ws.cell(row=i, column=14, value=r.get("강의장",""))
+        ws.cell(row=i, column=15, value=r.get("비고",""))
+        # 모집률 낮으면 빨간색
+        if r.get("정원",0) > 0 and mr < 65:
+            c_mr.font = Font(color="C53030", bold=True)
+        if r.get("정원",0) > 0 and sr < 70:
+            c_sr.font = Font(color="C53030", bold=True)
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
 # ── 마스터 DB 파싱 ────────────────────────────────
 @st.cache_data(show_spinner="파일 읽는 중...")
 def parse_plan(file_bytes):
@@ -368,6 +611,31 @@ if recruit_file:
     else:
         recruit_bytes = recruit_file.read()
 
+# ── 사이드바: 담당자 현황 파일 ──────────────────
+with st.sidebar:
+    st.markdown("### 👤 지점 담당자 현황")
+    AUTO_STAFF = "staff.xlsx"
+    if os.path.exists(AUTO_STAFF):
+        st.success("✅ staff.xlsx 자동 로드됨", icon="👤")
+        staff_file = AUTO_STAFF
+        s_override = st.file_uploader("담당자 파일 교체", type=["xlsx","XLSX"], key="staff_up")
+        if s_override: staff_file = s_override
+    else:
+        staff_file = st.file_uploader(
+            "지점 담당자 현황 엑셀 업로드", type=["xlsx","XLSX"], key="staff_up"
+        )
+
+staff_map = {}
+if staff_file:
+    if isinstance(staff_file, str):
+        with open(staff_file,"rb") as f: staff_bytes = f.read()
+    else:
+        staff_bytes = staff_file.read()
+    try:
+        staff_map = parse_staff_file(staff_bytes)
+    except Exception:
+        staff_map = {}
+
 # ── Google Sheets 데이터 로드 (또는 session_state) ──
 if sheet:
     db = load_gsheet_data(sheet)
@@ -416,9 +684,10 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ════════════════════════════════════════════════
 # 탭 구성
 # ════════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab0, tab1, tab_msg, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📋 개설 계획",
     "🎯 모집현황 입력",
+    "📨 메신저 파싱",
     "📊 모집현황 조회",
     "🔍 과정 추적 관리",
     "🔴 반납 분석",
@@ -770,6 +1039,137 @@ with tab1:
                     st.session_state["last_week"] = week_label.strip()
                     st.success(f"✅ {saved}개 과정 저장 완료! ({선택지점} / {week_label})")
                     st.rerun()
+
+# ══════════════════════════════════════════════
+# TAB MSG : 메신저 파싱
+# ══════════════════════════════════════════════
+with tab_msg:
+    st.markdown("#### 📨 모집현황 메신저 파싱")
+    st.caption("지점 담당자가 메신저로 보낸 보고 내용을 붙여넣으면 자동으로 표로 정리하고 엑셀로 내려받을 수 있습니다.")
+
+    col_wk, col_info = st.columns([1, 2])
+    with col_wk:
+        week_label_m = st.text_input("기준 주차", placeholder="예: 3월 3주", key="msg_week")
+    with col_info:
+        if staff_map:
+            st.info(f"👤 담당자 {len(staff_map)}명 로드됨 — 이름으로 계열/지점 자동 매핑", icon="✅")
+        else:
+            st.warning("사이드바에서 '지점 담당자 현황' 파일을 업로드하면 이름→지점 자동 매핑됩니다.", icon="⚠️")
+
+    msg_text = st.text_area(
+        "메신저 텍스트 붙여넣기 (한 명 또는 여러 명 한번에 가능)",
+        placeholder="이정민\n안녕하세요! IT인천 모집현황 보고드립니다\n\n1. 과정명 : ...\n- 훈련기간 : 2026-03-20 ~ 2026-08-21\n- 모집인원 : 13명\n- 확정인원 : 13명\n\n고의정\n안녕하세요 컴퓨터종로 ...",
+        height=280,
+        key="msg_input",
+    )
+
+    btn_col, opt_col, reset_col = st.columns([2, 2, 1])
+    with btn_col:
+        do_parse = st.button("🔍 파싱 실행", type="primary", use_container_width=True)
+    with opt_col:
+        append_mode = st.checkbox(
+            "📥 기존 결과에 추가 (순차 입력 시 체크)",
+            value=False,
+            key="msg_append",
+            help="담당자별로 따로 붙여넣을 때 체크하면 결과가 누적됩니다."
+        )
+    with reset_col:
+        if st.button("🗑 초기화", use_container_width=True):
+            st.session_state.pop("parsed_results", None)
+            st.rerun()
+
+    if do_parse:
+        if not msg_text.strip():
+            st.error("텍스트를 입력해주세요.")
+        else:
+            with st.spinner("파싱 중..."):
+                new_parsed = parse_messenger_all(msg_text.strip(), staff_map, courses)
+            if append_mode and st.session_state.get("parsed_results"):
+                # 중복 제거 (같은 보고자+과정명 이미 있으면 덮어쓰기)
+                existing = st.session_state["parsed_results"]
+                existing_keys = {(r["보고자"], r["과정명"]) for r in existing}
+                merged = existing + [r for r in new_parsed if (r["보고자"], r["과정명"]) not in existing_keys]
+                st.session_state["parsed_results"] = merged
+                st.success(f"✅ {len(new_parsed)}개 추가 → 누적 {len(merged)}개")
+            else:
+                st.session_state["parsed_results"] = new_parsed
+                if new_parsed:
+                    st.success(f"✅ {len(new_parsed)}개 과정 파싱 완료!")
+                else:
+                    st.warning("과정을 찾지 못했습니다. 형식을 확인해주세요.")
+
+    if st.session_state.get("parsed_results"):
+        parsed = st.session_state["parsed_results"]
+        st.markdown("---")
+
+        # 요약 KPI
+        kc = st.columns(4)
+        reporters = list(dict.fromkeys(r["보고자"] for r in parsed if r["보고자"]))
+        total_확정 = sum(r["확정인원"] for r in parsed)
+        total_정원 = sum(r["정원"] for r in parsed)
+        avg_mr = round(total_확정/total_정원*100, 1) if total_정원 > 0 else 0
+        warn = sum(1 for r in parsed if r["정원"] > 0 and r["모집률(%)"] < 65)
+        for col, num, lbl, clr in [
+            (kc[0], len(reporters), f"보고 담당자 {','.join(reporters[:3])}{'...' if len(reporters)>3 else ''}", "#2b6cb0"),
+            (kc[1], len(parsed),   "파싱 과정 수",   "#276749"),
+            (kc[2], f"{avg_mr}%",  "평균 모집률",    "#e53e3e" if avg_mr < 65 else "#276749"),
+            (kc[3], warn,          "모집 경고(65%↓)","#e53e3e"),
+        ]:
+            with col:
+                st.markdown(
+                    f'<div class="kpi-box"><div class="kpi-num" style="color:{clr};font-size:1.3rem">{num}</div>'
+                    f'<div class="kpi-label">{lbl}</div></div>',
+                    unsafe_allow_html=True,
+                )
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # 결과 테이블
+        display_cols = ["보고자","계열","지점","훈련종류","과정명","시작일","종료일","훈련일수","훈련시간","정원","확정인원","신청인원","모집률(%)","신청률(%)","강의장","매칭과정명","비고"]
+        df_p = pd.DataFrame(parsed)[display_cols]
+
+        def style_msg_row(row):
+            if row.get("정원", 0) == 0:
+                return ["background:#f7fafc"] * len(row)
+            if row.get("모집률(%)", 0) < 65:
+                return ["background:#fff5f5"] * len(row)
+            return [""] * len(row)
+
+        styled_p = (
+            df_p.style
+            .apply(style_msg_row, axis=1)
+            .map(lambda v: "color:#e53e3e;font-weight:700" if isinstance(v,(int,float)) and v < 65 else
+                           "color:#276749;font-weight:700" if isinstance(v,(int,float)) and v >= 65 else "",
+                 subset=["모집률(%)"])
+            .map(lambda v: "color:#e53e3e;font-weight:700" if isinstance(v,(int,float)) and v < 70 else
+                           "color:#276749;font-weight:700" if isinstance(v,(int,float)) and v >= 70 else "",
+                 subset=["신청률(%)"])
+        )
+        st.dataframe(styled_p, use_container_width=True, hide_index=True)
+
+        # 비고 직접 수정
+        st.markdown("**비고 추가 (선택사항)**")
+        for idx, r in enumerate(parsed):
+            nt = st.text_input(
+                f"{r['지점']} · {r['과정명'][:25]}",
+                value=r.get("비고",""),
+                key=f"msg_nt_{idx}",
+                label_visibility="collapsed",
+                placeholder=f"[{r['지점']}] {r['과정명'][:25]} — 비고 입력"
+            )
+            parsed[idx]["비고"] = nt
+
+        st.markdown("---")
+        if week_label_m.strip():
+            excel_bytes = export_messenger_excel(parsed, week_label_m.strip())
+            st.download_button(
+                label=f"📥 엑셀 다운로드 — (개설과정 조사) {week_label_m}.xlsx",
+                data=excel_bytes,
+                file_name=f"(개설과정 조사) {week_label_m}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        else:
+            st.info("기준 주차를 입력하면 엑셀 다운로드 버튼이 활성화됩니다.", icon="💡")
 
 # ══════════════════════════════════════════════
 # TAB 2 : 모집현황 조회
