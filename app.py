@@ -341,7 +341,10 @@ def parse_recruit_summary(file_bytes):
             if cur_year not in summary:
                 summary[cur_year] = {}
             vals = [row[i] for i in range(2, 14)]  # 1월~12월
-            summary[cur_year][b] = [float(x) if x is not None else 0.0 for x in vals]
+            def safe_float(x):
+                try: return float(x) if x is not None else 0.0
+                except: return 0.0
+            summary[cur_year][b] = [safe_float(x) for x in vals]
     return summary
 
 # ── 사이드바: 모집현황 파일 업로드 ──────────────
