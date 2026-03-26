@@ -344,7 +344,7 @@ def parse_recruit_summary(file_bytes):
 # ── 사이드바: 모집현황 파일 업로드 ──────────────
 with st.sidebar:
     st.markdown("### 📊 모집현황 누적 파일")
-    AUTO_RECRUIT = "recruit.xlsx.xlsx"
+    AUTO_RECRUIT = "recruit.xlsx"
     if os.path.exists(AUTO_RECRUIT):
         st.success("✅ recruit.xlsx 자동 로드됨", icon="📊")
         recruit_file = AUTO_RECRUIT
