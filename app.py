@@ -754,19 +754,86 @@ with tab0:
             "</div>"
         )
 
+    # DB에서 각 과정의 개설상태 매핑 (지점+과정명으로 조회)
+    def get_db_status(c):
+        k = course_key(c["지점"], c["과정명"], c.get("운영회차","1"))
+        rec = db.get(k)
+        if rec:
+            return rec.get("개설상태",""), rec.get("확정인원",""), rec.get("신청인원",""), rec.get("모집률","")
+        return "", "", "", ""
+
+    STATUS_ICON = {
+        "개강확정": "✅", "개강연기": "🔄", "폐강": "✖", "준비중": "⬜"
+    }
+
+    # 집계에 개설상태 반영
+    def empty_stat2():
+        return {"수":0,"정원":0,"진행중":0,"예정":0,"완료":0,"미확보":0,"개강확정":0,"미등록":0}
+
+    s_tot2 = defaultdict(empty_stat2)
+    s_br2  = defaultdict(lambda: defaultdict(empty_stat2))
+    for c in courses:
+        ser = c["계열"] or "미분류"
+        br  = c["지점"] or "미분류"
+        st2, _, _, _ = get_db_status(c)
+        for d in [s_tot2[ser], s_br2[ser][br]]:
+            d["수"] += 1
+            d["정원"] += c["정원"]
+            d[c["진행상태"]] = d.get(c["진행상태"],0) + 1
+            if c["강의장상태"] == "미확보": d["미확보"] += 1
+            if st2 == "개강확정": d["개강확정"] += 1
+            elif not st2: d["미등록"] += 1
+
+    s_tot2 = dict(sorted(s_tot2.items()))
+    s_br2  = {k: dict(sorted(v.items())) for k, v in sorted(s_br2.items())}
+
+    G2 = "2fr 0.6fr 0.8fr 0.6fr 0.6fr 0.6fr 0.7fr 0.7fr"
+
+    def th2():
+        return (
+            f"<div style='display:grid;grid-template-columns:{G2};background:#1a365d;color:white;"
+            f"border-radius:6px 6px 0 0;padding:0.45rem 0.8rem;font-size:0.79rem;font-weight:700;gap:4px'>"
+            "<span>구분</span><span style='text-align:center'>과정수</span>"
+            "<span style='text-align:center'>정원합계</span><span style='text-align:center'>진행중</span>"
+            "<span style='text-align:center'>예정</span><span style='text-align:center'>완료</span>"
+            "<span style='text-align:center'>✅개강확정</span>"
+            "<span style='text-align:center'>❓미등록</span></div>"
+        )
+
+    def tr2(label, d, bg, bold=False, indent=False):
+        lc = "#1a365d" if bold else "#4a5568"
+        fw = "700" if bold else "400"
+        pl = "1.6rem" if indent else "0.8rem"
+        pre = "└ " if indent else ""
+        uc = "color:#e53e3e;font-weight:700;" if d.get("미등록",0) > 0 else "color:#718096;"
+        return (
+            f"<div style='display:grid;grid-template-columns:{G2};background:{bg};"
+            f"border:1px solid #e2e8f0;border-top:none;"
+            f"padding:0.38rem 0.8rem 0.38rem {pl};font-size:0.81rem;gap:4px;align-items:center'>"
+            f"<span style='color:{lc};font-weight:{fw}'>{pre}{label}</span>"
+            f"<span style='text-align:center;font-weight:700;color:#2b6cb0'>{d['수']}</span>"
+            f"<span style='text-align:center'>{d['정원']:,}명</span>"
+            f"<span style='text-align:center;color:#276749;font-weight:600'>{d.get('진행중',0)}</span>"
+            f"<span style='text-align:center;color:#2c5282'>{d.get('예정',0)}</span>"
+            f"<span style='text-align:center;color:#718096'>{d.get('완료',0)}</span>"
+            f"<span style='text-align:center;color:#276749;font-weight:700'>{d.get('개강확정',0)}</span>"
+            f"<span style='text-align:center;{uc}'>{d.get('미등록',0) if d.get('미등록',0)>0 else '-'}</span>"
+            "</div>"
+        )
+
     st.markdown("**📂 계열 > 지점별 현황**")
-    st.markdown(th(), unsafe_allow_html=True)
+    st.markdown(th2(), unsafe_allow_html=True)
     ri = 0
-    for ser, sv in s_tot.items():
-        st.markdown(tr(ser, sv, "#ebf4ff", bold=True), unsafe_allow_html=True)
-        for br, bv in s_br[ser].items():
-            st.markdown(tr(br, bv, "#fff" if ri % 2 == 0 else "#f7fafc", indent=True),
+    for ser, sv in s_tot2.items():
+        st.markdown(tr2(ser, sv, "#ebf4ff", bold=True), unsafe_allow_html=True)
+        for br, bv in s_br2[ser].items():
+            st.markdown(tr2(br, bv, "#fff" if ri%2==0 else "#f7fafc", indent=True),
                         unsafe_allow_html=True)
             ri += 1
     st.markdown("<br>", unsafe_allow_html=True)
 
     st.markdown("**📄 과정 목록**")
-    cf1, cf2, cf3 = st.columns(3)
+    cf1, cf2, cf3, cf4 = st.columns(4)
     with cf1:
         sf = st.multiselect("진행상태", ["진행중","예정","완료","정보없음"],
                             default=["진행중","예정"])
@@ -775,19 +842,58 @@ with tab0:
                             default=["확보","미확보","미확인"])
     with cf3:
         bf = st.multiselect("지점", sorted(set(c["지점"] for c in courses if c["지점"])))
+    with cf4:
+        stf0 = st.multiselect("개설상태", ["✅ 개강확정","🔄 개강연기","✖ 폐강","⬜ 준비중","❓ 미등록"],
+                              default=[])
 
     fc = [c for c in courses
           if c["진행상태"] in sf and c["강의장상태"] in vf
           and (not bf or c["지점"] in bf)]
+
+    # 개설상태 필터 적용
+    if stf0:
+        def match_stf(c):
+            st2, _, _, _ = get_db_status(c)
+            icon = STATUS_ICON.get(st2, "❓")
+            label = f"{icon} {st2}" if st2 else "❓ 미등록"
+            return label in stf0
+        fc = [c for c in fc if match_stf(c)]
+
     st.caption(f"{len(fc)}개 과정")
 
     if fc:
-        st.dataframe(
-            pd.DataFrame([{
+        rows0 = []
+        for c in fc:
+            st2, 확정, 신청, mr = get_db_status(c)
+            icon = STATUS_ICON.get(st2, "❓")
+            개설라벨 = f"{icon} {st2}" if st2 else "❓ 미등록"
+            정원 = c["정원"] or 1
+            mr_pct = round(float(mr or 0)*100, 1) if mr else ""
+            rows0.append({
                 "계열": c["계열"], "지점": c["지점"], "훈련종류": c["훈련종류"],
-                "과정명": c["과정명"], "시작일": c["시작일"], "종료일": c["종료일"],
-                "정원": c["정원"], "진행상태": c["진행상태"], "강의장": c["강의장상태"],
-            } for c in fc]),
+                "과정명": c["과정명"],
+                "시작일": fmt_mmdd(c["시작일"]) if c["시작일"] else "",
+                "종료일": fmt_mmdd(c["종료일"]) if c["종료일"] else "",
+                "정원": c["정원"],
+                "확정인원": 확정 if 확정 != "" else "-",
+                "모집률(%)": mr_pct if mr_pct != "" else "-",
+                "개설상태": 개설라벨,
+                "진행상태": c["진행상태"],
+            })
+        df0 = pd.DataFrame(rows0)
+
+        def style_plan(row):
+            s = row["개설상태"]
+            if "미등록" in s and row["진행상태"] == "진행중":
+                return ["background:#fff5f5"] * len(row)
+            if "개강연기" in s or "폐강" in s:
+                return ["background:#fffbeb"] * len(row)
+            if "개강확정" in s:
+                return ["background:#f0fff4"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            df0.style.apply(style_plan, axis=1),
             use_container_width=True, hide_index=True,
         )
 
