@@ -36,12 +36,23 @@ SHEET_COLS = [
     "key","계열","지점","훈련종류","과정명","시작일","종료일","정원",
     "기준주차","확정인원","신청인원","모집률","신청률",
     "개설상태","연기사유","모집비고",
+    "이수자평가예정","이수자평가신청일",
     "평가완료","평가완료일","평가비고",
     "비용신청","비용금액","비용신청일","비용비고",
     "취업_이수자","취업_취업자","취업_조사일","취업비고",
     "만족도점수","만족도조사일","만족도비고",
     "업데이트",
 ]
+
+# 계열별 지점 목록
+SERIES_BRANCHES = {
+    "IT":    ["강남","신촌","대구","부산","인천","대전"],
+    "컴퓨터":["강남","홍대","부산","부평","대구","대전","광주","수원","구월","일산","울산","노원","분당","종로","안산","천안","안양","청주"],
+    "게임":  ["강남","신촌","대구","대전","부평","부산","광주","일산","수원","분당","안산","노원","천안"],
+    "뷰티":  ["대구","대전","수원","부산","인천"],
+    "요리":  [],
+    "승무원":[],
+}
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_gsheet_data(_sheet):
@@ -253,12 +264,13 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ════════════════════════════════════════════════
 # 탭 구성
 # ════════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 개설 계획",
     "🎯 모집현황 입력",
     "📊 모집현황 조회",
     "🔍 과정 추적 관리",
     "🔴 반납 분석",
+    "🏅 인증평가 현황",
 ])
 
 # ══════════════════════════════════════════════
@@ -372,26 +384,30 @@ with tab1:
 
     # ── 주차 / 계열 / 지점 선택 ──────────────────
     SERIES_OPTS = ["— 계열 선택 —", "IT", "컴퓨터", "게임", "뷰티", "요리", "승무원"]
-    hdr1, hdr2, hdr3 = st.columns([1, 1, 2])
+    hdr1, hdr2, hdr3 = st.columns([1, 1, 1])
     with hdr1:
         week_label = st.text_input("기준 주차", placeholder="예: 3월3주",
                                    value=st.session_state.get("last_week",""))
     with hdr2:
         선택계열 = st.selectbox("계열 선택", SERIES_OPTS)
     with hdr3:
-        입력지점 = st.text_input("지점명 입력", placeholder="예: 강남, 홍대, 신촌, 대구, 부산 등")
+        branch_opts = SERIES_BRANCHES.get(선택계열, [])
+        if branch_opts:
+            raw_지점 = st.selectbox("지점 선택", ["— 지점 선택 —"] + branch_opts)
+            선택지점 = raw_지점 if raw_지점 != "— 지점 선택 —" else ""
+        else:
+            선택지점 = st.text_input("지점명 입력", placeholder="예: 강남, 홍대 등")
 
-    if 선택계열 == "— 계열 선택 —" or not 입력지점.strip():
-        st.info("계열을 선택하고 지점명을 입력하면 해당 과정 목록이 표시됩니다.")
+    if 선택계열 == "— 계열 선택 —" or not 선택지점.strip():
+        st.info("계열과 지점을 선택하면 해당 과정 목록이 표시됩니다.")
     else:
-        선택지점 = 입력지점.strip()
-        # 계열과 지점으로 필터 (계열 부분 일치, 지점 부분 일치)
+        선택지점 = 선택지점.strip()
+        # 계열과 지점으로 필터 (지점 표기: "컴퓨터 강남" 형식 또는 엑셀 지점명 부분일치)
         지점과정 = [
             c for c in courses
-            if 선택계열 in (c.get("계열") or "")
+            if (선택계열 in (c.get("계열") or "") or f"{선택계열} {선택지점}" in (c.get("지점") or ""))
             and 선택지점 in (c.get("지점") or "")
         ]
-        # 계열 일치 없으면 지점만으로 재시도
         if not 지점과정:
             지점과정 = [c for c in courses if 선택지점 in (c.get("지점") or "")]
         if not 지점과정:
@@ -415,13 +431,15 @@ with tab1:
                        "✖" if cur_state == "폐강" else "⬜"
 
                 date_str = ""
-                if c.get("시작일") and c.get("종료일"):
-                    try:
-                        s = c["시작일"].strftime("%m/%d") if hasattr(c["시작일"], "strftime") else str(c["시작일"])[:5]
-                        e = c["종료일"].strftime("%m/%d") if hasattr(c["종료일"], "strftime") else str(c["종료일"])[:5]
-                        date_str = f" ({s}~{e})"
-                    except Exception:
-                        pass
+                try:
+                    s_raw = str(c.get("시작일",""))
+                    e_raw = str(c.get("종료일",""))
+                    s_d = s_raw[5:10].replace("-","/") if len(s_raw) >= 10 else s_raw
+                    e_d = e_raw[5:10].replace("-","/") if len(e_raw) >= 10 else e_raw
+                    if s_d and e_d:
+                        date_str = f" ({s_d}~{e_d})"
+                except Exception:
+                    pass
 
                 with st.expander(
                     f"{icon}  **{c['과정명']}**  —  정원 {c['정원']}명{date_str}",
@@ -468,12 +486,38 @@ with tab1:
                         key=f"nt1_{i}", placeholder="기타 메모"
                     )
 
+                    st.markdown("---")
+                    ev_예정 = st.checkbox(
+                        "📝 이수자 평가 예정",
+                        value=str(ex.get("이수자평가예정","")) == "True",
+                        key=f"evp_{i}"
+                    )
+                    ev_신청일_val = None
+                    ev_결과_val = ""
+                    if ev_예정:
+                        ev_c1, ev_c2 = st.columns(2)
+                        with ev_c1:
+                            try:
+                                ev_default = datetime.strptime(ex["이수자평가신청일"],"%Y-%m-%d").date() \
+                                    if ex.get("이수자평가신청일") else datetime.today().date()
+                            except Exception:
+                                ev_default = datetime.today().date()
+                            ev_신청일_val = st.date_input("신청 예정일", value=ev_default, key=f"evd_{i}")
+                        with ev_c2:
+                            ev_결과_val = st.text_input(
+                                "평가 결과", value=ex.get("평가비고",""),
+                                key=f"evr_{i}", placeholder="예: 합격 / 진행중 / 불합격"
+                            )
+
                     입력결과.append({
                         "course": c, "key": key_c,
                         "확정": 확정, "신청": 신청,
                         "모집률": round(확정 / 정원, 4) if 정원 > 0 else 0,
                         "신청률": round(신청 / 정원, 4) if 정원 > 0 else 0,
                         "상태": 상태, "사유": 사유, "비고": 비고,
+                        "이수자평가예정": ev_예정,
+                        "이수자평가신청일": ev_신청일_val.strftime("%Y-%m-%d") if ev_신청일_val else "",
+                        "평가비고": ev_결과_val,
                     })
 
             st.markdown("---")
@@ -499,9 +543,11 @@ with tab1:
                             "개설상태": item["상태"],
                             "연기사유": item["사유"],
                             "모집비고": item["비고"],
+                            "이수자평가예정":   str(item.get("이수자평가예정", False)),
+                            "이수자평가신청일": item.get("이수자평가신청일",""),
                             "평가완료":    db.get(k, {}).get("평가완료",""),
                             "평가완료일":  db.get(k, {}).get("평가완료일",""),
-                            "평가비고":    db.get(k, {}).get("평가비고",""),
+                            "평가비고":    item.get("평가비고","") or db.get(k, {}).get("평가비고",""),
                             "비용신청":    db.get(k, {}).get("비용신청",""),
                             "비용금액":    db.get(k, {}).get("비용금액",""),
                             "비용신청일":  db.get(k, {}).get("비용신청일",""),
@@ -533,6 +579,19 @@ with tab2:
     if not recs:
         st.info("저장된 모집현황이 없습니다. '모집현황 입력' 탭에서 먼저 데이터를 입력하세요.")
     else:
+        # 월별 필터 (훈련시작일 기준)
+        def get_month(r):
+            s = str(r.get("시작일",""))
+            return s[:7] if len(s) >= 7 else "미정"
+        month_set = sorted(set(get_month(r) for r in recs))
+        month_labels = {m: (f"{int(m[5:7])}월" if len(m) >= 7 and m[5:7].isdigit() else m) for m in month_set}
+        sel_month = st.radio(
+            "훈련시작 월", ["전체"] + month_set,
+            format_func=lambda x: "전체" if x == "전체" else month_labels.get(x, x),
+            horizontal=True,
+        )
+        recs = recs if sel_month == "전체" else [r for r in recs if get_month(r) == sel_month]
+
         fc1, fc2, fc3, fc4 = st.columns(4)
         with fc1: sf2 = st.multiselect("계열", sorted(set(r.get("계열","") for r in recs)))
         with fc2: bf2 = st.multiselect("지점", sorted(set(r.get("지점","") for r in recs)))
@@ -638,139 +697,199 @@ with tab2:
 # TAB 3 : 과정 추적 관리
 # ══════════════════════════════════════════════
 with tab3:
-    st.markdown("#### 개강확정 과정별 추적 관리")
-    st.caption("이수자 평가 · 비용신청 · 취업성과 · 만족도를 과정별로 입력·관리합니다.")
+    st.markdown("#### 개강확정 과정별 성과 관리")
 
     confirmed_keys = [k for k, v in db.items() if v.get("개설상태") == "개강확정"]
 
     if not confirmed_keys:
         st.info("개강확정 과정이 없습니다. 모집현황 입력 탭에서 데이터를 저장하면 표시됩니다.")
     else:
-        tfc1, tfc2 = st.columns(2)
-        with tfc1:
-            br_t = st.multiselect(
-                "지점 필터",
-                sorted(set(db[k].get("지점","") for k in confirmed_keys)),
-                key="track_br",
-            )
-        with tfc2:
-            view_item = st.selectbox(
-                "입력 항목",
-                ["전체보기","이수자평가","비용신청","취업성과","만족도"],
-            )
-
+        br_t = st.multiselect(
+            "지점 필터",
+            sorted(set(db[k].get("지점","") for k in confirmed_keys)),
+            key="track_br",
+        )
         keys_show = [k for k in confirmed_keys
                      if not br_t or db[k].get("지점") in br_t]
 
-        for key in keys_show:
-            r  = db[key]
+        # ── 4개 성과 탭 ─────────────────────────────
+        t3a, t3b, t3c, t3d = st.tabs(["📝 이수자평가 현황", "💰 비용신청 현황", "💼 취업 현황", "⭐ 만족도 현황"])
+
+        def course_label(r):
             mp = float(r.get("모집률",0) or 0) * 100
-            label = (
-                f"**{r.get('과정명','')}** — {r.get('지점','')} / {r.get('훈련종류','')}  |  "
-                f"{r.get('시작일','')} ~ {r.get('종료일','')}  |  모집률 {mp:.1f}%"
-            )
-            with st.expander(label, expanded=False):
-                with st.form(key=f"form_{key}"):
-                    cols = st.columns(4)
+            return f"**{r.get('과정명','')}** — {r.get('지점','')}  |  {str(r.get('시작일',''))[:7]}  |  모집률 {mp:.1f}%"
 
-                    # 이수자 평가
-                    with cols[0]:
-                        st.markdown("**📝 이수자 평가**")
-                        ev_yn = st.checkbox("완료", value=str(r.get("평가완료","")) == "True",
-                                            key=f"ev_{key}")
-                        ev_dt = st.date_input("완료일",
-                                              value=datetime.strptime(r["평가완료일"],"%Y-%m-%d").date()
-                                              if r.get("평가완료일") else datetime.today(),
-                                              key=f"evd_{key}")
-                        ev_nt = st.text_input("비고", value=r.get("평가비고",""), key=f"evn_{key}")
+        # ── 이수자평가 현황 ──────────────────────────
+        with t3a:
+            st.caption("이수자 평가 신청 및 결과를 관리합니다.")
+            for key in keys_show:
+                r = db[key]
+                ev_planned = str(r.get("이수자평가예정","")) == "True"
+                ev_done    = str(r.get("평가완료","")) == "True"
+                badge = "✅완료" if ev_done else ("📋예정" if ev_planned else "⬜미등록")
+                with st.expander(f"{badge}  {course_label(r)}", expanded=False):
+                    with st.form(key=f"eva_{key}"):
+                        a1, a2, a3 = st.columns(3)
+                        with a1:
+                            ev_pl = st.checkbox("평가 예정", value=ev_planned, key=f"evpa_{key}")
+                            ev_yn = st.checkbox("평가 완료", value=ev_done, key=f"evya_{key}")
+                        with a2:
+                            try:
+                                evd_def = datetime.strptime(r["이수자평가신청일"],"%Y-%m-%d").date() \
+                                    if r.get("이수자평가신청일") else datetime.today().date()
+                            except Exception:
+                                evd_def = datetime.today().date()
+                            ev_신청일 = st.date_input("신청 예정일", value=evd_def, key=f"evsd_{key}")
+                            try:
+                                evc_def = datetime.strptime(r["평가완료일"],"%Y-%m-%d").date() \
+                                    if r.get("평가완료일") else datetime.today().date()
+                            except Exception:
+                                evc_def = datetime.today().date()
+                            ev_완료일 = st.date_input("완료일", value=evc_def, key=f"evcd_{key}")
+                        with a3:
+                            ev_nt = st.text_input("결과/비고", value=r.get("평가비고",""), key=f"evna_{key}",
+                                                  placeholder="합격/불합격/진행중")
+                        if st.form_submit_button("💾 저장", use_container_width=True):
+                            updated = dict(r)
+                            updated.update({
+                                "이수자평가예정":   str(ev_pl),
+                                "이수자평가신청일": ev_신청일.strftime("%Y-%m-%d"),
+                                "평가완료":  str(ev_yn),
+                                "평가완료일": ev_완료일.strftime("%Y-%m-%d"),
+                                "평가비고": ev_nt,
+                                "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            })
+                            save_record(key, updated)
+                            if not sheet: st.session_state.local_db[key] = updated
+                            db[key] = updated
+                            st.success("저장 완료!"); st.rerun()
 
-                    # 비용 신청
-                    with cols[1]:
-                        st.markdown("**💰 비용 신청**")
-                        cs_yn = st.checkbox("완료", value=str(r.get("비용신청","")) == "True",
-                                            key=f"cs_{key}")
-                        cs_am = st.number_input("금액(원)",
-                                                value=int(r.get("비용금액",0) or 0),
-                                                min_value=0, step=10000, key=f"csa_{key}")
-                        cs_dt = st.date_input("신청일",
-                                              value=datetime.strptime(r["비용신청일"],"%Y-%m-%d").date()
-                                              if r.get("비용신청일") else datetime.today(),
-                                              key=f"csd_{key}")
-                        cs_nt = st.text_input("비고", value=r.get("비용비고",""), key=f"csn_{key}")
+        # ── 비용신청 현황 ────────────────────────────
+        with t3b:
+            st.caption("훈련비용 신청 현황을 관리합니다.")
+            for key in keys_show:
+                r = db[key]
+                cs_done = str(r.get("비용신청","")) == "True"
+                badge = "✅완료" if cs_done else "⬜미신청"
+                with st.expander(f"{badge}  {course_label(r)}", expanded=False):
+                    with st.form(key=f"csb_{key}"):
+                        b1, b2, b3 = st.columns(3)
+                        with b1:
+                            cs_yn = st.checkbox("신청 완료", value=cs_done, key=f"csyb_{key}")
+                            cs_am = st.number_input("금액(원)", value=int(r.get("비용금액",0) or 0),
+                                                    min_value=0, step=10000, key=f"csab_{key}")
+                        with b2:
+                            try:
+                                csd_def = datetime.strptime(r["비용신청일"],"%Y-%m-%d").date() \
+                                    if r.get("비용신청일") else datetime.today().date()
+                            except Exception:
+                                csd_def = datetime.today().date()
+                            cs_dt = st.date_input("신청일", value=csd_def, key=f"csdb_{key}")
+                        with b3:
+                            cs_nt = st.text_input("비고", value=r.get("비용비고",""), key=f"csnb_{key}")
+                        if st.form_submit_button("💾 저장", use_container_width=True):
+                            updated = dict(r)
+                            updated.update({
+                                "비용신청": str(cs_yn), "비용금액": cs_am,
+                                "비용신청일": cs_dt.strftime("%Y-%m-%d"), "비용비고": cs_nt,
+                                "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            })
+                            save_record(key, updated)
+                            if not sheet: st.session_state.local_db[key] = updated
+                            db[key] = updated
+                            st.success("저장 완료!"); st.rerun()
 
-                    # 취업 성과
-                    with cols[2]:
-                        st.markdown("**💼 취업 성과**")
-                        em_total = st.number_input("이수자수",
-                                                   value=int(r.get("취업_이수자",0) or 0),
-                                                   min_value=0, key=f"emt_{key}")
-                        em_hired = st.number_input("취업자수",
-                                                   value=int(r.get("취업_취업자",0) or 0),
-                                                   min_value=0, key=f"emh_{key}")
-                        em_dt = st.date_input("조사일",
-                                              value=datetime.strptime(r["취업_조사일"],"%Y-%m-%d").date()
-                                              if r.get("취업_조사일") else datetime.today(),
-                                              key=f"emd_{key}")
-                        em_nt = st.text_input("비고", value=r.get("취업비고",""), key=f"emn_{key}")
-                        if em_total > 0:
-                            st.metric("취업률", f"{em_hired/em_total*100:.1f}%")
+        # ── 취업 현황 ────────────────────────────────
+        with t3c:
+            st.caption("이수자 취업 성과를 관리합니다.")
+            for key in keys_show:
+                r = db[key]
+                em_tot = int(r.get("취업_이수자",0) or 0)
+                em_hi  = int(r.get("취업_취업자",0) or 0)
+                emp_rate = f"{em_hi/em_tot*100:.1f}%" if em_tot > 0 else "미입력"
+                badge = f"💼{emp_rate}" if em_tot > 0 else "⬜미입력"
+                with st.expander(f"{badge}  {course_label(r)}", expanded=False):
+                    with st.form(key=f"emc_{key}"):
+                        c1, c2, c3 = st.columns(3)
+                        with c1:
+                            em_total = st.number_input("이수자수", value=em_tot, min_value=0, key=f"emtc_{key}")
+                            em_hired = st.number_input("취업자수", value=em_hi,  min_value=0, key=f"emhc_{key}")
+                        with c2:
+                            try:
+                                emd_def = datetime.strptime(r["취업_조사일"],"%Y-%m-%d").date() \
+                                    if r.get("취업_조사일") else datetime.today().date()
+                            except Exception:
+                                emd_def = datetime.today().date()
+                            em_dt = st.date_input("조사일", value=emd_def, key=f"emdc_{key}")
+                            if em_total > 0:
+                                st.metric("취업률", f"{em_hired/em_total*100:.1f}%")
+                        with c3:
+                            em_nt = st.text_input("비고", value=r.get("취업비고",""), key=f"emnc_{key}")
+                        if st.form_submit_button("💾 저장", use_container_width=True):
+                            updated = dict(r)
+                            updated.update({
+                                "취업_이수자": em_total, "취업_취업자": em_hired,
+                                "취업_조사일": em_dt.strftime("%Y-%m-%d"), "취업비고": em_nt,
+                                "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            })
+                            save_record(key, updated)
+                            if not sheet: st.session_state.local_db[key] = updated
+                            db[key] = updated
+                            st.success("저장 완료!"); st.rerun()
 
-                    # 만족도
-                    with cols[3]:
-                        st.markdown("**⭐ 만족도**")
-                        sat_sc = st.number_input("점수 (0~5)",
-                                                 value=float(r.get("만족도점수",0) or 0),
-                                                 min_value=0.0, max_value=5.0, step=0.1,
-                                                 key=f"sas_{key}")
-                        sat_dt = st.date_input("조사일",
-                                               value=datetime.strptime(r["만족도조사일"],"%Y-%m-%d").date()
-                                               if r.get("만족도조사일") else datetime.today(),
-                                               key=f"sad_{key}")
-                        sat_nt = st.text_input("비고", value=r.get("만족도비고",""), key=f"san_{key}")
+        # ── 만족도 현황 ──────────────────────────────
+        with t3d:
+            st.caption("훈련 만족도 조사 결과를 관리합니다.")
+            for key in keys_show:
+                r = db[key]
+                sat = float(r.get("만족도점수",0) or 0)
+                badge = f"⭐{sat:.1f}" if sat > 0 else "⬜미입력"
+                with st.expander(f"{badge}  {course_label(r)}", expanded=False):
+                    with st.form(key=f"satd_{key}"):
+                        d1, d2, d3 = st.columns(3)
+                        with d1:
+                            sat_sc = st.number_input("점수 (0~5)", value=sat,
+                                                     min_value=0.0, max_value=5.0, step=0.1,
+                                                     key=f"sasd_{key}")
+                        with d2:
+                            try:
+                                sadd_def = datetime.strptime(r["만족도조사일"],"%Y-%m-%d").date() \
+                                    if r.get("만족도조사일") else datetime.today().date()
+                            except Exception:
+                                sadd_def = datetime.today().date()
+                            sat_dt = st.date_input("조사일", value=sadd_def, key=f"sadd_{key}")
+                        with d3:
+                            sat_nt = st.text_input("비고", value=r.get("만족도비고",""), key=f"sand_{key}")
+                        if st.form_submit_button("💾 저장", use_container_width=True):
+                            updated = dict(r)
+                            updated.update({
+                                "만족도점수": sat_sc,
+                                "만족도조사일": sat_dt.strftime("%Y-%m-%d"), "만족도비고": sat_nt,
+                                "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            })
+                            save_record(key, updated)
+                            if not sheet: st.session_state.local_db[key] = updated
+                            db[key] = updated
+                            st.success("저장 완료!"); st.rerun()
 
-                    if st.form_submit_button("💾 저장", use_container_width=True):
-                        updated = dict(r)
-                        updated.update({
-                            "평가완료": str(ev_yn), "평가완료일": ev_dt.strftime("%Y-%m-%d"),
-                            "평가비고": ev_nt,
-                            "비용신청": str(cs_yn), "비용금액": cs_am,
-                            "비용신청일": cs_dt.strftime("%Y-%m-%d"), "비용비고": cs_nt,
-                            "취업_이수자": em_total, "취업_취업자": em_hired,
-                            "취업_조사일": em_dt.strftime("%Y-%m-%d"), "취업비고": em_nt,
-                            "만족도점수": sat_sc,
-                            "만족도조사일": sat_dt.strftime("%Y-%m-%d"), "만족도비고": sat_nt,
-                            "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        })
-                        save_record(key, updated)
-                        if not sheet:
-                            st.session_state.local_db[key] = updated
-                        db[key] = updated
-                        st.success("저장 완료!")
-                        st.rerun()
-
-        # 집계
+        # ── 집계 ─────────────────────────────────────
         st.markdown("---")
-        st.markdown("**📊 추적 항목 집계**")
+        st.markdown("**📊 성과 집계**")
         agg = st.columns(4)
-        ev_done  = sum(1 for k in confirmed_keys
-                       if str(db[k].get("평가완료","")) == "True")
-        cs_done  = sum(1 for k in confirmed_keys
-                       if str(db[k].get("비용신청","")) == "True")
-        em_list  = [(int(db[k].get("취업_이수자",0) or 0),
-                     int(db[k].get("취업_취업자",0) or 0))
-                    for k in confirmed_keys
-                    if int(db[k].get("취업_이수자",0) or 0) > 0]
+        ev_done_cnt  = sum(1 for k in confirmed_keys if str(db[k].get("평가완료","")) == "True")
+        cs_done_cnt  = sum(1 for k in confirmed_keys if str(db[k].get("비용신청","")) == "True")
+        em_list  = [(int(db[k].get("취업_이수자",0) or 0), int(db[k].get("취업_취업자",0) or 0))
+                    for k in confirmed_keys if int(db[k].get("취업_이수자",0) or 0) > 0]
         avg_emp  = (sum(h/t for t,h in em_list)/len(em_list)*100) if em_list else 0
         sat_list = [float(db[k].get("만족도점수",0) or 0)
-                    for k in confirmed_keys
-                    if float(db[k].get("만족도점수",0) or 0) > 0]
+                    for k in confirmed_keys if float(db[k].get("만족도점수",0) or 0) > 0]
         avg_sat  = sum(sat_list)/len(sat_list) if sat_list else 0
 
         for col, num, lbl, clr in [
-            (agg[0], f"{ev_done}/{len(confirmed_keys)}", "이수자평가 완료", "#2b6cb0"),
-            (agg[1], f"{cs_done}/{len(confirmed_keys)}", "비용신청 완료",   "#276749"),
-            (agg[2], f"{avg_emp:.1f}%",                  "평균 취업률",     "#553c9a"),
-            (agg[3], f"{avg_sat:.2f}/5.0",               "평균 만족도",     "#744210"),
+            (agg[0], f"{ev_done_cnt}/{len(confirmed_keys)}", "이수자평가 완료", "#2b6cb0"),
+            (agg[1], f"{cs_done_cnt}/{len(confirmed_keys)}", "비용신청 완료",   "#276749"),
+            (agg[2], f"{avg_emp:.1f}%",                      "평균 취업률",     "#553c9a"),
+            (agg[3], f"{avg_sat:.2f}/5.0",                   "평균 만족도",     "#744210"),
         ]:
             with col:
                 st.markdown(
@@ -820,3 +939,199 @@ with tab4:
             } for r in show]),
             use_container_width=True, hide_index=True,
         )
+
+# ══════════════════════════════════════════════
+# TAB 5 : 인증평가 현황
+# ══════════════════════════════════════════════
+@st.cache_data(show_spinner="인증평가 파일 읽는 중...")
+def parse_cert(file_bytes):
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    ws = wb.active
+    rows = []
+    cur_series = ""
+    for row in ws.iter_rows(min_row=7, values_only=True):
+        if not row[2]:   # 지점명 없으면 skip
+            continue
+        if row[1]:
+            cur_series = str(row[1]).strip()
+        def v(x): return x if x is not None else ""
+        def f(x):
+            try: return round(float(x), 2)
+            except: return ""
+        # 유효기간 파싱 (S열=index 18): "2024.01.01~2026.12.31"
+        유효기간_raw = str(v(row[18])).strip()
+        end_year = ""
+        if "~" in 유효기간_raw:
+            try:
+                end_part = 유효기간_raw.split("~")[1].strip()
+                end_year = int(end_part[:4])
+            except: pass
+        # 등급 파싱
+        등급_raw = str(v(row[3])).strip()
+        if "5년" in 등급_raw:    등급분류 = "5년 우수"
+        elif "3년" in 등급_raw:  등급분류 = "3년 인증"
+        elif "1년" in 등급_raw:  등급분류 = "1년 인증"
+        elif "유예" in 등급_raw: 등급분류 = "인증유예"
+        else:                     등급분류 = 등급_raw
+        올해대상 = (end_year == 2026) or (등급분류 == "인증유예")
+        rows.append({
+            "계열": cur_series,
+            "지점": str(v(row[2])).strip(),
+            "평가등급": 등급_raw,
+            "등급분류": 등급분류,
+            "역량평가총점": f(row[4]),
+            "훈련성과총점": f(row[5]),
+            "실업점수":     f(row[6]),
+            "근로점수":     f(row[7]),
+            "일반취업률":   f(row[8]),
+            "고용유지":     f(row[9]),
+            "만족도_실업자":f(row[10]),
+            "만족도_재직자":f(row[11]),
+            "훈련비중_실업":str(v(row[12])),
+            "훈련비중_근로":str(v(row[13])),
+            "현장평가총점": f(row[14]),
+            "과정관리":     f(row[15]),
+            "인프라":       f(row[16]),
+            "전담인력":     f(row[17]),
+            "유효기간":     유효기간_raw,
+            "만료년도":     end_year,
+            "올해평가대상": 올해대상,
+        })
+    return rows
+
+with tab5:
+    st.markdown("#### 🏅 인증평가 현황")
+
+    AUTO_CERT = "cert.xlsx.xlsx"
+    with st.sidebar:
+        st.markdown("### 🏅 인증평가 파일")
+        if os.path.exists(AUTO_CERT):
+            st.success("✅ cert.xlsx 자동 로드됨", icon="🏅")
+            cert_file = AUTO_CERT
+            cert_override = st.file_uploader("인증평가 파일 교체", type=["xlsx","XLSX"],
+                                              key="cert_up")
+            if cert_override: cert_file = cert_override
+        else:
+            cert_file = st.file_uploader("인증평가 엑셀 업로드", type=["xlsx","XLSX"],
+                                          key="cert_up")
+
+    if not cert_file:
+        st.info("👈 왼쪽 사이드바에서 인증평가 엑셀 파일을 업로드해주세요.")
+    else:
+        if isinstance(cert_file, str):
+            with open(cert_file,"rb") as f: cert_bytes = f.read()
+        else:
+            cert_bytes = cert_file.read()
+        cert_rows = parse_cert(cert_bytes)
+
+        # 등급별 스타일
+        GRADE_STYLE = {
+            "5년 우수":  ("🥇","#744210","#FEFCBF"),
+            "3년 인증":  ("✅","#276749","#C6F6D5"),
+            "1년 인증":  ("⚠️","#c05621","#FEEBC8"),
+            "인증유예":  ("🔴","#822727","#FED7D7"),
+        }
+
+        # KPI
+        total_c = len(cert_rows)
+        g5 = sum(1 for r in cert_rows if r["등급분류"]=="5년 우수")
+        g3 = sum(1 for r in cert_rows if r["등급분류"]=="3년 인증")
+        g1 = sum(1 for r in cert_rows if r["등급분류"]=="1년 인증")
+        gy = sum(1 for r in cert_rows if r["등급분류"]=="인증유예")
+        target = sum(1 for r in cert_rows if r["올해평가대상"])
+
+        kc = st.columns(5)
+        for col, num, lbl, clr in [
+            (kc[0], total_c, "전체 지점",    "#2b6cb0"),
+            (kc[1], g5,      "5년 우수",     "#744210"),
+            (kc[2], g3,      "3년 인증",     "#276749"),
+            (kc[3], g1+gy,   "1년/유예",     "#c05621"),
+            (kc[4], target,  "올해 평가대상","#e53e3e"),
+        ]:
+            with col:
+                st.markdown(
+                    f'<div class="kpi-box"><div class="kpi-num" style="color:{clr}">{num}</div>'
+                    f'<div class="kpi-label">{lbl}</div></div>',
+                    unsafe_allow_html=True,
+                )
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # 필터
+        cf1, cf2, cf3 = st.columns(3)
+        with cf1:
+            sel_ser  = st.multiselect("계열", sorted(set(r["계열"] for r in cert_rows)), key="cf_ser")
+        with cf2:
+            sel_grade= st.multiselect("등급", ["5년 우수","3년 인증","1년 인증","인증유예"], key="cf_gr")
+        with cf3:
+            only_target = st.checkbox("올해 평가대상만", key="cf_target")
+
+        filtered_c = [
+            r for r in cert_rows
+            if (not sel_ser   or r["계열"]    in sel_ser)
+            and (not sel_grade or r["등급분류"] in sel_grade)
+            and (not only_target or r["올해평가대상"])
+        ]
+
+        # 올해 평가대상 경고
+        target_list = [r for r in filtered_c if r["올해평가대상"]]
+        if target_list:
+            st.warning(f"⚠️ **올해 평가대상 {len(target_list)}개 지점** — 유효기간 만료 또는 인증유예")
+
+        # 테이블
+        disp_rows = []
+        for r in filtered_c:
+            ic, fc, bc = GRADE_STYLE.get(r["등급분류"], ("","#000","#fff"))
+            disp_rows.append({
+                "계열":         r["계열"],
+                "지점":         r["지점"],
+                "평가등급":     r["평가등급"],
+                "올해대상":     "🔴 대상" if r["올해평가대상"] else "",
+                "역량평가총점": r["역량평가총점"],
+                "훈련성과총점": r["훈련성과총점"],
+                "실업점수":     r["실업점수"],
+                "근로점수":     r["근로점수"],
+                "일반취업률":   r["일반취업률"],
+                "고용유지":     r["고용유지"],
+                "만족도_실업":  r["만족도_실업자"],
+                "만족도_재직":  r["만족도_재직자"],
+                "현장평가총점": r["현장평가총점"],
+                "과정관리":     r["과정관리"],
+                "인프라":       r["인프라"],
+                "전담인력":     r["전담인력"],
+                "유효기간":     r["유효기간"],
+            })
+
+        df_c = pd.DataFrame(disp_rows)
+
+        def style_cert(row):
+            등급 = ""
+            for r in filtered_c:
+                if r["지점"] == row["지점"] and r["계열"] == row["계열"]:
+                    등급 = r["등급분류"]; break
+            if 등급 == "5년 우수": return ["background:#FEFCBF"] * len(row)
+            if 등급 == "1년 인증": return ["background:#FEEBC8"] * len(row)
+            if 등급 == "인증유예": return ["background:#FED7D7"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            df_c.style.apply(style_cert, axis=1),
+            use_container_width=True, hide_index=True,
+        )
+
+        # 계열별 평균 요약
+        st.markdown("---")
+        st.markdown("**📊 계열별 평균 역량평가 총점**")
+        from collections import defaultdict
+        ser_scores = defaultdict(list)
+        for r in cert_rows:
+            if isinstance(r["역량평가총점"], float):
+                ser_scores[r["계열"]].append(r["역량평가총점"])
+        sum_cols = st.columns(len(ser_scores) or 1)
+        for i, (ser, scores) in enumerate(sorted(ser_scores.items())):
+            avg = sum(scores)/len(scores)
+            with sum_cols[i % len(sum_cols)]:
+                st.markdown(
+                    f'<div class="kpi-box"><div class="kpi-num" style="color:#2b6cb0;font-size:1.3rem">{avg:.1f}</div>'
+                    f'<div class="kpi-label">{ser}</div></div>',
+                    unsafe_allow_html=True,
+                )
