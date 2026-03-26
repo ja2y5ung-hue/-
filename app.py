@@ -295,6 +295,9 @@ def parse_recruit_sheet(file_bytes, sheet_name):
         def f(x):
             try: return round(float(x), 4)
             except: return 0.0
+        def i(x):
+            try: return int(float(x)) if x not in (None, "", " ") else 0
+            except: return 0
         s = row[9]
         e = row[10]
         rows.append({
@@ -309,9 +312,9 @@ def parse_recruit_sheet(file_bytes, sheet_name):
             "훈련시간":v(row[8]),
             "시작일":  s.strftime("%Y-%m-%d") if isinstance(s, datetime) else str(s or ""),
             "종료일":  e.strftime("%Y-%m-%d") if isinstance(e, datetime) else str(e or ""),
-            "정원":    int(v(row[11]) or 0),
-            "확정인원":int(v(row[12]) or 0),
-            "신청인원":int(v(row[13]) or 0),
+            "정원":    i(row[11]),
+            "확정인원":i(row[12]),
+            "신청인원":i(row[13]),
             "모집률":  f(row[14]),
             "신청률":  f(row[15]),
         })
