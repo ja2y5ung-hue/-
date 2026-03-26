@@ -175,6 +175,23 @@ def classify_reason(r):
 def course_key(지점, 과정명, 회차="1"):
     return f"{지점}|{과정명}|{회차}"
 
+def fmt_mmdd(date_str):
+    """날짜 문자열에서 MM/DD 추출 (다양한 형식 처리)"""
+    s = str(date_str).strip()
+    # 표준: "2026-09-17" or "2026-09-17 00:00:00"
+    m = re.search(r"\d{4}[-./](\d{2})[-./](\d{2})", s)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    # 붙여쓰기: "20260917"
+    m2 = re.match(r"\d{4}(\d{2})(\d{2})$", s)
+    if m2:
+        return f"{m2.group(1)}/{m2.group(2)}"
+    # "2026-0917" (두 번째 구분자 누락)
+    m3 = re.match(r"\d{4}-(\d{2})(\d{2})$", s)
+    if m3:
+        return f"{m3.group(1)}/{m3.group(2)}"
+    return s[:5] if len(s) >= 5 else s
+
 def calc_단위기간(시작일_str, 종료일_str):
     """개강일 기준 월별 단위기간 리스트 반환"""
     try:
@@ -259,6 +276,92 @@ else:
     file_bytes = plan_file.read()
 courses, returns = parse_plan(file_bytes)
 
+# ── 모집현황 누적 파일 파싱 함수 ──────────────────
+@st.cache_data(show_spinner=False)
+def parse_recruit_sheet(file_bytes, sheet_name):
+    """모집현황 엑셀의 특정 시트 파싱 (26년/25년/24년 등)
+    Row1=집계, Row2=헤더, Row3+=데이터
+    컬럼: 월,계열,지점,훈련종류,직종,회차,과정명,훈련일,훈련시간,시작일,종료일,정원,확정인원,신청인원,모집률,신청률
+    """
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    if sheet_name not in wb.sheetnames:
+        return []
+    ws = wb[sheet_name]
+    rows = []
+    for row in ws.iter_rows(min_row=3, values_only=True):
+        if not row[6]:   # 과정명 없으면 skip
+            continue
+        def v(x): return x if x is not None else ""
+        def f(x):
+            try: return round(float(x), 4)
+            except: return 0.0
+        s = row[9]
+        e = row[10]
+        rows.append({
+            "월":      str(v(row[0])),
+            "계열":    str(v(row[1])),
+            "지점":    str(v(row[2])),
+            "훈련종류":str(v(row[3])),
+            "직종":    str(v(row[4])),
+            "회차":    str(v(row[5]) or "1"),
+            "과정명":  str(v(row[6])),
+            "훈련일":  v(row[7]),
+            "훈련시간":v(row[8]),
+            "시작일":  s.strftime("%Y-%m-%d") if isinstance(s, datetime) else str(s or ""),
+            "종료일":  e.strftime("%Y-%m-%d") if isinstance(e, datetime) else str(e or ""),
+            "정원":    int(v(row[11]) or 0),
+            "확정인원":int(v(row[12]) or 0),
+            "신청인원":int(v(row[13]) or 0),
+            "모집률":  f(row[14]),
+            "신청률":  f(row[15]),
+        })
+    return rows
+
+@st.cache_data(show_spinner=False)
+def parse_recruit_summary(file_bytes):
+    """20~25년 모집 누적 시트에서 연도별 월별 집계 파싱"""
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    sheet_name = "20~25년 모집 누적"
+    if sheet_name not in wb.sheetnames:
+        return {}
+    ws = wb[sheet_name]
+    # 구조: 각 연도 블록이 반복 (연도헤더, 구분, 1월~12월)
+    # B열=구분명, C~N열=1월~12월
+    summary = {}
+    cur_year = None
+    for row in ws.iter_rows(min_row=1, values_only=True):
+        b = str(row[1] or "").strip()
+        if "년도" in b or ("20" in b and "년" in b):
+            m = re.search(r"(20\d{2})", b)
+            if m: cur_year = int(m.group(1))
+        elif cur_year and b in ("과정수", "정원", "확정인원", "신청인원", "모집률", "신청률"):
+            if cur_year not in summary:
+                summary[cur_year] = {}
+            vals = [row[i] for i in range(2, 14)]  # 1월~12월
+            summary[cur_year][b] = [float(x) if x is not None else 0.0 for x in vals]
+    return summary
+
+# ── 사이드바: 모집현황 파일 업로드 ──────────────
+with st.sidebar:
+    st.markdown("### 📊 모집현황 누적 파일")
+    AUTO_RECRUIT = "recruit.xlsx.xlsx"
+    if os.path.exists(AUTO_RECRUIT):
+        st.success("✅ recruit.xlsx 자동 로드됨", icon="📊")
+        recruit_file = AUTO_RECRUIT
+        r_override = st.file_uploader("모집현황 파일 교체", type=["xlsx","XLSX"], key="rec_up")
+        if r_override: recruit_file = r_override
+    else:
+        recruit_file = st.file_uploader(
+            "모집현황 누적 엑셀 업로드\n(★모집현황 누적본)", type=["xlsx","XLSX"], key="rec_up"
+        )
+
+recruit_bytes = None
+if recruit_file:
+    if isinstance(recruit_file, str):
+        with open(recruit_file,"rb") as f: recruit_bytes = f.read()
+    else:
+        recruit_bytes = recruit_file.read()
+
 # ── Google Sheets 데이터 로드 (또는 session_state) ──
 if sheet:
     db = load_gsheet_data(sheet)
@@ -307,13 +410,14 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ════════════════════════════════════════════════
 # 탭 구성
 # ════════════════════════════════════════════════
-tab0, tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab0, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📋 개설 계획",
     "🎯 모집현황 입력",
     "📊 모집현황 조회",
     "🔍 과정 추적 관리",
     "🔴 반납 분석",
     "🏅 인증평가 현황",
+    "📈 연도별 비교",
 ])
 
 # ══════════════════════════════════════════════
@@ -418,6 +522,55 @@ with tab0:
 with tab1:
     st.markdown("#### 주차별 모집현황 입력")
 
+    # ── 기개강 과정 일괄 등록 ──────────────────────
+    if recruit_bytes:
+        with st.expander("📥 기개강 과정 일괄 등록 (모집현황 파일에서 자동 가져오기)", expanded=False):
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            rec26 = parse_recruit_sheet(recruit_bytes, "26년")
+            past_courses = [r for r in rec26 if r["시작일"] and r["시작일"] <= today_str]
+            st.caption(f"26년 시트에서 이미 개강한 과정 **{len(past_courses)}건** 발견 (기준일: {today_str})")
+            if past_courses:
+                preview_df = pd.DataFrame([{
+                    "월": r["월"], "계열": r["계열"], "지점": r["지점"],
+                    "과정명": r["과정명"][:30], "시작일": r["시작일"],
+                    "정원": r["정원"], "확정인원": r["확정인원"], "신청인원": r["신청인원"],
+                    "모집률(%)": round(r["모집률"]*100,1), "신청률(%)": round(r["신청률"]*100,1),
+                } for r in past_courses])
+                st.dataframe(preview_df, use_container_width=True, hide_index=True)
+                if st.button("💾 전체 일괄 등록 (개강확정 처리)", type="primary"):
+                    imported = 0
+                    for r in past_courses:
+                        k = course_key(r["지점"], r["과정명"], r["회차"])
+                        record = {
+                            "key": k,
+                            "계열": r["계열"], "지점": r["지점"],
+                            "훈련종류": r["훈련종류"], "과정명": r["과정명"],
+                            "시작일": r["시작일"], "종료일": r["종료일"],
+                            "정원": r["정원"],
+                            "기준주차": r["월"],
+                            "확정인원": r["확정인원"],
+                            "신청인원": r["신청인원"],
+                            "모집률": r["모집률"],
+                            "신청률": r["신청률"],
+                            "개설상태": "개강확정",
+                            "연기사유": "", "모집비고": "누적파일 자동등록",
+                            "이수자평가예정": "", "이수자평가신청일": "",
+                            "평가완료":"","평가완료일":"","평가비고":"",
+                            "비용단위기간":"","비용신청":"","비용금액":0,
+                            "비용신청일":"","비용비고":"",
+                            "취업_이수자":"","취업_취업자":"","취업_조사일":"","취업비고":"",
+                            "만족도점수":"","만족도조사일":"","만족도비고":"",
+                            "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        }
+                        save_record(k, record)
+                        if not sheet: st.session_state.local_db[k] = record
+                        db[k] = record
+                        imported += 1
+                    st.success(f"✅ {imported}개 과정 개강확정으로 등록 완료!")
+                    st.rerun()
+    else:
+        st.info("사이드바에서 모집현황 누적 파일을 업로드하면 기개강 과정을 자동으로 불러올 수 있습니다.", icon="💡")
+
     if not sheet:
         st.warning(
             "Google Sheets가 연결되지 않아 저장된 데이터가 **브라우저 새로고침 시 초기화**됩니다.\n\n"
@@ -457,10 +610,10 @@ with tab1:
             st.warning(f"'{선택지점}' 지점의 과정이 연간계획에 없습니다.")
         else:
             # 상태 아이콘 색 구분 설명
-            st.caption(f"✅ 개강확정  🔄 개강연기  ✖ 폐강  |  총 {len(지점과정)}개 과정")
+            st.caption(f"⬜ 준비중  ✅ 개강확정  🔄 개강연기  ✖ 폐강  |  총 {len(지점과정)}개 과정")
             st.markdown("---")
 
-            STATE_OPTS = ["개강확정", "개강연기", "폐강"]
+            STATE_OPTS = ["준비중", "개강확정", "개강연기", "폐강"]
             입력결과 = []
 
             for i, c in enumerate(지점과정):
@@ -471,14 +624,13 @@ with tab1:
                 cur_state = ex.get("개설상태", "개강확정")
                 icon = "✅" if cur_state == "개강확정" else \
                        "🔄" if cur_state == "개강연기" else \
-                       "✖" if cur_state == "폐강" else "⬜"
+                       "✖" if cur_state == "폐강" else \
+                       "⬜" if cur_state == "준비중" else "⬜"
 
                 date_str = ""
                 try:
-                    s_raw = str(c.get("시작일",""))
-                    e_raw = str(c.get("종료일",""))
-                    s_d = s_raw[5:10].replace("-","/") if len(s_raw) >= 10 else s_raw
-                    e_d = e_raw[5:10].replace("-","/") if len(e_raw) >= 10 else e_raw
+                    s_d = fmt_mmdd(c.get("시작일",""))
+                    e_d = fmt_mmdd(c.get("종료일",""))
                     if s_d and e_d:
                         date_str = f" ({s_d}~{e_d})"
                 except Exception:
@@ -638,8 +790,8 @@ with tab2:
         fc1, fc2, fc3, fc4 = st.columns(4)
         with fc1: sf2 = st.multiselect("계열", sorted(set(r.get("계열","") for r in recs)))
         with fc2: bf2 = st.multiselect("지점", sorted(set(r.get("지점","") for r in recs)))
-        with fc3: stf = st.multiselect("개설상태", ["개강확정","개강연기","폐강"],
-                                        default=["개강확정","개강연기","폐강"])
+        with fc3: stf = st.multiselect("개설상태", ["준비중","개강확정","개강연기","폐강"],
+                                        default=["준비중","개강확정","개강연기","폐강"])
         with fc4: warn_only = st.checkbox("경고 과정만")
 
         filtered = [
@@ -705,6 +857,8 @@ with tab2:
 
         def style_row(row):
             s = row["개설상태"]
+            if s == "준비중":
+                return ["color:#718096;background:#f0f4f8"] * len(row)
             if s == "폐강":
                 return ["color:#aaa;background:#f7fafc"] * len(row)
             if s == "개강연기":
@@ -1035,15 +1189,28 @@ def parse_cert(file_bytes):
         # 다음 평가 연도: 등급(YY) + 기간 → ex) 3년인증(25) → 2025+3=2028
         next_eval_year = None
         m_grade = re.search(r"(\d+)년\s*(?:인증|우수)\((\d{2})\)", 등급_raw)
-        if m_grade:
-            period    = int(m_grade.group(1))
-            start_yy  = int(m_grade.group(2))
-            start_full = 2000 + start_yy
-            # 유효기간 마지막 해에 평가 실시: 예) 3년 인증(24) → 2024~2026 유효 → 2026년 평가
-            next_eval_year = start_full + period - 1
         THIS_YEAR = datetime.now().year
+        if m_grade:
+            period     = int(m_grade.group(1))
+            start_yy   = int(m_grade.group(2))
+            start_full = 2000 + start_yy
+            # 유효기간 마지막 해에 평가: 3년 인증(24) → 2026년 평가
+            next_eval_year = start_full + period - 1
+            # 올해 새로 받은 인증은 제외 (1년/3년/5년 모두)
+            if start_full == THIS_YEAR:
+                next_eval_year = None
+        # 유효기간 컬럼이 명시된 경우: 그 기간 안에는 평가 대상 아님
+        # 유효기간 끝나는 해에 평가 (end_year가 있고 미래라면 그 해가 eval)
+        if end_year and isinstance(end_year, int):
+            if end_year > THIS_YEAR:
+                # 유효기간 남아있음 → 평가 대상 아님 (end_year 해에 평가 예정)
+                next_eval_year = end_year
+            elif end_year == THIS_YEAR:
+                # 유효기간이 올해 끝남 → 올해 평가 대상
+                next_eval_year = THIS_YEAR
+            # end_year < THIS_YEAR: 유효기간 이미 지남 → grade 기반 eval_year 유지
         올해대상 = (next_eval_year == THIS_YEAR) or (등급분류 == "인증유예")
-        내년대상 = (next_eval_year == THIS_YEAR + 1)
+        내년대상 = (next_eval_year == THIS_YEAR + 1) if next_eval_year else False
         rows.append({
             "계열": cur_series,
             "지점": str(v(row[2])).strip(),
@@ -1217,3 +1384,131 @@ with tab5:
                     f'<div class="kpi-label">{ser}</div></div>',
                     unsafe_allow_html=True,
                 )
+
+# ══════════════════════════════════════════════
+# TAB 6 : 연도별 비교
+# ══════════════════════════════════════════════
+with tab6:
+    st.markdown("#### 📈 연도별 모집현황 비교")
+
+    if not recruit_bytes:
+        st.info("👈 사이드바에서 '모집현황 누적 파일'을 업로드하면 연도별 비교를 볼 수 있습니다.")
+    else:
+        CUR_YEAR = datetime.now().year
+        CMP_YEARS = [str(CUR_YEAR), str(CUR_YEAR-1), str(CUR_YEAR-2)]
+
+        # 각 연도 시트 파싱
+        year_data = {}
+        for yr in CMP_YEARS:
+            sheet_name = f"{yr[2:]}년"  # "26년", "25년", "24년"
+            rows = parse_recruit_sheet(recruit_bytes, sheet_name)
+            if rows:
+                year_data[yr] = rows
+
+        # 누적 시트 요약
+        summary = parse_recruit_summary(recruit_bytes)
+
+        # ── 필터 ─────────────────────────────────────
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            all_series = sorted(set(r["계열"] for rows in year_data.values() for r in rows if r["계열"]))
+            sel_ser_c = st.multiselect("계열 필터", all_series, key="cmp_ser")
+        with fc2:
+            sel_month_c = st.multiselect("월 필터", ["1월","2월","3월","4월","5월","6월",
+                                                      "7월","8월","9월","10월","11월","12월"], key="cmp_mon")
+
+        def filter_rows(rows):
+            return [r for r in rows
+                    if (not sel_ser_c or r["계열"] in sel_ser_c)
+                    and (not sel_month_c or r["월"] in sel_month_c)]
+
+        # ── 연도별 KPI 비교 ───────────────────────────
+        st.markdown("---")
+        st.markdown("**전체 집계 비교**")
+        kpi_cols = st.columns(len(year_data))
+        for ci, (yr, rows) in enumerate(sorted(year_data.items(), reverse=True)):
+            fr = filter_rows(rows)
+            tot_정원   = sum(r["정원"] for r in fr)
+            tot_확정   = sum(r["확정인원"] for r in fr)
+            tot_신청   = sum(r["신청인원"] for r in fr)
+            avg_모집   = tot_확정/tot_정원*100 if tot_정원 > 0 else 0
+            avg_신청   = tot_신청/tot_정원*100 if tot_정원 > 0 else 0
+            with kpi_cols[ci]:
+                st.markdown(
+                    f"<div class='kpi-box'>"
+                    f"<div class='kpi-num' style='color:#2b6cb0;font-size:1.4rem'>{yr}년</div>"
+                    f"<div style='font-size:0.85rem;margin-top:0.3rem'>"
+                    f"과정수 <b>{len(fr)}</b>건<br>"
+                    f"정원 <b>{tot_정원}</b>명 / 확정 <b>{tot_확정}</b>명<br>"
+                    f"모집률 <b style='color:{'#e53e3e' if avg_모집<65 else '#276749'}'>{avg_모집:.1f}%</b> &nbsp; "
+                    f"신청률 <b style='color:{'#e53e3e' if avg_신청<70 else '#276749'}'>{avg_신청:.1f}%</b>"
+                    f"</div></div>",
+                    unsafe_allow_html=True
+                )
+
+        # ── 월별 비교 테이블 ──────────────────────────
+        st.markdown("---")
+        st.markdown("**월별 모집률 비교**")
+        MONTHS = ["1월","2월","3월","4월","5월","6월","7월","8월","9월","10월","11월","12월"]
+        comp_rows = []
+        for mon in MONTHS:
+            row_d = {"월": mon}
+            for yr, rows in sorted(year_data.items(), reverse=True):
+                fr = [r for r in filter_rows(rows) if r["월"] == mon]
+                if fr:
+                    tot_정 = sum(r["정원"] for r in fr)
+                    tot_확 = sum(r["확정인원"] for r in fr)
+                    tot_신 = sum(r["신청인원"] for r in fr)
+                    row_d[f"{yr}년 과정수"]   = len(fr)
+                    row_d[f"{yr}년 모집률(%)"] = round(tot_확/tot_정*100,1) if tot_정>0 else 0
+                    row_d[f"{yr}년 신청률(%)"] = round(tot_신/tot_정*100,1) if tot_정>0 else 0
+                else:
+                    row_d[f"{yr}년 과정수"]    = 0
+                    row_d[f"{yr}년 모집률(%)"] = 0
+                    row_d[f"{yr}년 신청률(%)"] = 0
+            comp_rows.append(row_d)
+
+        df_comp = pd.DataFrame([r for r in comp_rows if any(r.get(f"{yr}년 과정수",0)>0 for yr in year_data)])
+
+        def style_comp(val):
+            if isinstance(val, float):
+                if val > 0 and val < 65: return "color:#e53e3e;font-weight:700"
+                if val >= 65: return "color:#276749;font-weight:700"
+            return ""
+
+        mr_cols = [c for c in df_comp.columns if "모집률" in c or "신청률" in c]
+        st.dataframe(
+            df_comp.style.map(style_comp, subset=mr_cols),
+            use_container_width=True, hide_index=True
+        )
+
+        # ── 계열별 비교 ───────────────────────────────
+        st.markdown("---")
+        st.markdown("**계열별 비교**")
+        all_ser_cmp = sorted(set(r["계열"] for rows in year_data.values() for r in rows if r["계열"]))
+        ser_rows = []
+        for ser in all_ser_cmp:
+            row_d = {"계열": ser}
+            for yr, rows in sorted(year_data.items(), reverse=True):
+                fr = [r for r in rows if r["계열"] == ser
+                      and (not sel_month_c or r["월"] in sel_month_c)]
+                tot_정 = sum(r["정원"] for r in fr)
+                tot_확 = sum(r["확정인원"] for r in fr)
+                row_d[f"{yr}년 과정수"]   = len(fr)
+                row_d[f"{yr}년 모집률(%)"] = round(tot_확/tot_정*100,1) if tot_정>0 else 0
+            ser_rows.append(row_d)
+        st.dataframe(pd.DataFrame(ser_rows), use_container_width=True, hide_index=True)
+
+        # ── 과정별 상세 비교 ──────────────────────────
+        st.markdown("---")
+        st.markdown("**과정별 상세**")
+        detail_yr = st.selectbox("연도 선택", sorted(year_data.keys(), reverse=True), key="det_yr")
+        det_rows = filter_rows(year_data[detail_yr])
+        if det_rows:
+            st.dataframe(pd.DataFrame([{
+                "월": r["월"], "계열": r["계열"], "지점": r["지점"],
+                "과정명": r["과정명"], "시작일": r["시작일"], "종료일": r["종료일"],
+                "정원": r["정원"], "확정": r["확정인원"], "신청": r["신청인원"],
+                "모집률(%)": round(r["모집률"]*100,1),
+                "신청률(%)": round(r["신청률"]*100,1),
+            } for r in det_rows]), use_container_width=True, hide_index=True)
