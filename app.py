@@ -1039,7 +1039,8 @@ def parse_cert(file_bytes):
             period    = int(m_grade.group(1))
             start_yy  = int(m_grade.group(2))
             start_full = 2000 + start_yy
-            next_eval_year = start_full + period
+            # 유효기간 마지막 해에 평가 실시: 예) 3년 인증(24) → 2024~2026 유효 → 2026년 평가
+            next_eval_year = start_full + period - 1
         THIS_YEAR = datetime.now().year
         올해대상 = (next_eval_year == THIS_YEAR) or (등급분류 == "인증유예")
         내년대상 = (next_eval_year == THIS_YEAR + 1)
