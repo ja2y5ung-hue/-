@@ -10,8 +10,9 @@ import openpyxl
 import pandas as pd
 import re
 import os
+import calendar
 import difflib
-from datetime import datetime
+from datetime import datetime, date
 from io import BytesIO
 
 # ── Google Sheets (선택적 연동) ──────────────────
@@ -38,6 +39,7 @@ SHEET_COLS = [
     "개설상태","연기사유","모집비고",
     "이수자평가예정","이수자평가신청일",
     "평가완료","평가완료일","평가비고",
+    "비용단위기간",
     "비용신청","비용금액","비용신청일","비용비고",
     "취업_이수자","취업_취업자","취업_조사일","취업비고",
     "만족도점수","만족도조사일","만족도비고",
@@ -172,6 +174,47 @@ def classify_reason(r):
 
 def course_key(지점, 과정명, 회차="1"):
     return f"{지점}|{과정명}|{회차}"
+
+def calc_단위기간(시작일_str, 종료일_str):
+    """개강일 기준 월별 단위기간 리스트 반환"""
+    try:
+        s = datetime.strptime(str(시작일_str)[:10], "%Y-%m-%d").date()
+        e = datetime.strptime(str(종료일_str)[:10], "%Y-%m-%d").date()
+    except Exception:
+        return []
+    periods, cur, 회차 = [], s, 1
+    while cur <= e:
+        last = calendar.monthrange(cur.year, cur.month)[1]
+        end = cur.replace(day=last)
+        if end > e:
+            end = e
+        periods.append({
+            "회차": 회차,
+            "시작": cur.strftime("%Y.%m.%d"),
+            "종료": end.strftime("%Y.%m.%d"),
+            "key": f"{회차}",
+        })
+        cur = (cur.replace(day=28) + __import__('datetime').timedelta(days=4)).replace(day=1)
+        회차 += 1
+    return periods
+
+def parse_비용단위기간(raw):
+    """저장된 단위기간 문자열 → dict 파싱
+    포맷: '1|완료|1500000;2|미신청|0'
+    """
+    result = {}
+    if not raw:
+        return result
+    for seg in str(raw).split(";"):
+        parts = seg.split("|")
+        if len(parts) == 3:
+            result[parts[0]] = {"완료": parts[1] == "완료", "금액": int(parts[2] or 0)}
+    return result
+
+def serialize_비용단위기간(data):
+    """dict → 저장 문자열"""
+    return ";".join(f"{k}|{'완료' if v['완료'] else '미신청'}|{v['금액']}"
+                    for k, v in sorted(data.items()))
 
 # ── 마스터 DB 파싱 ────────────────────────────────
 @st.cache_data(show_spinner="파일 읽는 중...")
@@ -766,38 +809,54 @@ with tab3:
 
         # ── 비용신청 현황 ────────────────────────────
         with t3b:
-            st.caption("훈련비용 신청 현황을 관리합니다.")
+            st.caption("단위기간별 훈련비용 신청 현황을 관리합니다.")
             for key in keys_show:
                 r = db[key]
-                cs_done = str(r.get("비용신청","")) == "True"
-                badge = "✅완료" if cs_done else "⬜미신청"
+                기존_단위 = parse_비용단위기간(r.get("비용단위기간",""))
+                단위기간_list = calc_단위기간(r.get("시작일",""), r.get("종료일",""))
+                완료수 = sum(1 for v in 기존_단위.values() if v["완료"])
+                전체수 = len(단위기간_list)
+                badge = f"✅{완료수}/{전체수}회차" if 완료수 > 0 else "⬜미신청"
                 with st.expander(f"{badge}  {course_label(r)}", expanded=False):
-                    with st.form(key=f"csb_{key}"):
-                        b1, b2, b3 = st.columns(3)
-                        with b1:
-                            cs_yn = st.checkbox("신청 완료", value=cs_done, key=f"csyb_{key}")
-                            cs_am = st.number_input("금액(원)", value=int(r.get("비용금액",0) or 0),
-                                                    min_value=0, step=10000, key=f"csab_{key}")
-                        with b2:
-                            try:
-                                csd_def = datetime.strptime(r["비용신청일"],"%Y-%m-%d").date() \
-                                    if r.get("비용신청일") else datetime.today().date()
-                            except Exception:
-                                csd_def = datetime.today().date()
-                            cs_dt = st.date_input("신청일", value=csd_def, key=f"csdb_{key}")
-                        with b3:
-                            cs_nt = st.text_input("비고", value=r.get("비용비고",""), key=f"csnb_{key}")
-                        if st.form_submit_button("💾 저장", use_container_width=True):
-                            updated = dict(r)
-                            updated.update({
-                                "비용신청": str(cs_yn), "비용금액": cs_am,
-                                "비용신청일": cs_dt.strftime("%Y-%m-%d"), "비용비고": cs_nt,
-                                "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            })
-                            save_record(key, updated)
-                            if not sheet: st.session_state.local_db[key] = updated
-                            db[key] = updated
-                            st.success("저장 완료!"); st.rerun()
+                    if not 단위기간_list:
+                        st.warning("시작일/종료일 정보가 없어 단위기간을 계산할 수 없습니다.")
+                    else:
+                        st.caption(f"훈련기간: {r.get('시작일','')} ~ {r.get('종료일','')}  |  총 {전체수}회차")
+                        with st.form(key=f"csb_{key}"):
+                            new_단위 = {}
+                            for p in 단위기간_list:
+                                k_p = p["key"]
+                                prev = 기존_단위.get(k_p, {"완료": False, "금액": 0})
+                                pc1, pc2, pc3 = st.columns([2, 1, 2])
+                                with pc1:
+                                    st.markdown(
+                                        f"**{p['회차']}회차** &nbsp; `{p['시작']} ~ {p['종료']}`"
+                                    )
+                                with pc2:
+                                    yn = st.checkbox("신청완료", value=prev["완료"],
+                                                     key=f"csyn_{key}_{k_p}")
+                                with pc3:
+                                    am = st.number_input("금액(원)", value=int(prev["금액"]),
+                                                         min_value=0, step=10000,
+                                                         key=f"csam_{key}_{k_p}")
+                                new_단위[k_p] = {"완료": yn, "금액": am}
+                            cs_nt = st.text_input("비고", value=r.get("비용비고",""),
+                                                  key=f"csnb_{key}")
+                            if st.form_submit_button("💾 저장", use_container_width=True):
+                                total_am = sum(v["금액"] for v in new_단위.values() if v["완료"])
+                                all_done = all(v["완료"] for v in new_단위.values())
+                                updated = dict(r)
+                                updated.update({
+                                    "비용단위기간": serialize_비용단위기간(new_단위),
+                                    "비용신청":  str(all_done),
+                                    "비용금액":  total_am,
+                                    "비용비고":  cs_nt,
+                                    "업데이트":  datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                })
+                                save_record(key, updated)
+                                if not sheet: st.session_state.local_db[key] = updated
+                                db[key] = updated
+                                st.success("저장 완료!"); st.rerun()
 
         # ── 취업 현황 ────────────────────────────────
         with t3c:
@@ -966,14 +1025,24 @@ def parse_cert(file_bytes):
                 end_part = 유효기간_raw.split("~")[1].strip()
                 end_year = int(end_part[:4])
             except: pass
-        # 등급 파싱
+        # 등급 파싱 + 다음 평가 연도 계산
         등급_raw = str(v(row[3])).strip()
         if "5년" in 등급_raw:    등급분류 = "5년 우수"
         elif "3년" in 등급_raw:  등급분류 = "3년 인증"
         elif "1년" in 등급_raw:  등급분류 = "1년 인증"
         elif "유예" in 등급_raw: 등급분류 = "인증유예"
         else:                     등급분류 = 등급_raw
-        올해대상 = (end_year == 2026) or (등급분류 == "인증유예")
+        # 다음 평가 연도: 등급(YY) + 기간 → ex) 3년인증(25) → 2025+3=2028
+        next_eval_year = None
+        m_grade = re.search(r"(\d+)년\s*(?:인증|우수)\((\d{2})\)", 등급_raw)
+        if m_grade:
+            period    = int(m_grade.group(1))
+            start_yy  = int(m_grade.group(2))
+            start_full = 2000 + start_yy
+            next_eval_year = start_full + period
+        THIS_YEAR = datetime.now().year
+        올해대상 = (next_eval_year == THIS_YEAR) or (등급분류 == "인증유예")
+        내년대상 = (next_eval_year == THIS_YEAR + 1)
         rows.append({
             "계열": cur_series,
             "지점": str(v(row[2])).strip(),
@@ -993,9 +1062,11 @@ def parse_cert(file_bytes):
             "과정관리":     f(row[15]),
             "인프라":       f(row[16]),
             "전담인력":     f(row[17]),
-            "유효기간":     유효기간_raw,
-            "만료년도":     end_year,
-            "올해평가대상": 올해대상,
+            "유효기간":      유효기간_raw,
+            "만료년도":      end_year,
+            "다음평가연도":  next_eval_year,
+            "올해평가대상":  올해대상,
+            "내년평가대상":  내년대상,
         })
     return rows
 
@@ -1033,20 +1104,23 @@ with tab5:
         }
 
         # KPI
+        THIS_YEAR = datetime.now().year
         total_c = len(cert_rows)
         g5 = sum(1 for r in cert_rows if r["등급분류"]=="5년 우수")
         g3 = sum(1 for r in cert_rows if r["등급분류"]=="3년 인증")
         g1 = sum(1 for r in cert_rows if r["등급분류"]=="1년 인증")
         gy = sum(1 for r in cert_rows if r["등급분류"]=="인증유예")
-        target = sum(1 for r in cert_rows if r["올해평가대상"])
+        target_올해 = sum(1 for r in cert_rows if r["올해평가대상"])
+        target_내년 = sum(1 for r in cert_rows if r["내년평가대상"])
 
-        kc = st.columns(5)
+        kc = st.columns(6)
         for col, num, lbl, clr in [
-            (kc[0], total_c, "전체 지점",    "#2b6cb0"),
-            (kc[1], g5,      "5년 우수",     "#744210"),
-            (kc[2], g3,      "3년 인증",     "#276749"),
-            (kc[3], g1+gy,   "1년/유예",     "#c05621"),
-            (kc[4], target,  "올해 평가대상","#e53e3e"),
+            (kc[0], total_c,      "전체 지점",         "#2b6cb0"),
+            (kc[1], g5,           "5년 우수",          "#744210"),
+            (kc[2], g3,           "3년 인증",          "#276749"),
+            (kc[3], g1+gy,        "1년/유예",          "#c05621"),
+            (kc[4], target_올해,  f"{THIS_YEAR}년 대상","#e53e3e"),
+            (kc[5], target_내년,  f"{THIS_YEAR+1}년 대상","#c05621"),
         ]:
             with col:
                 st.markdown(
@@ -1063,19 +1137,25 @@ with tab5:
         with cf2:
             sel_grade= st.multiselect("등급", ["5년 우수","3년 인증","1년 인증","인증유예"], key="cf_gr")
         with cf3:
-            only_target = st.checkbox("올해 평가대상만", key="cf_target")
+            target_filter = st.radio("평가대상 필터", ["전체", f"{THIS_YEAR}년 대상", f"{THIS_YEAR+1}년 대상"],
+                                     horizontal=True, key="cf_target")
 
         filtered_c = [
             r for r in cert_rows
             if (not sel_ser   or r["계열"]    in sel_ser)
             and (not sel_grade or r["등급분류"] in sel_grade)
-            and (not only_target or r["올해평가대상"])
+            and (target_filter == "전체"
+                 or (target_filter == f"{THIS_YEAR}년 대상" and r["올해평가대상"])
+                 or (target_filter == f"{THIS_YEAR+1}년 대상" and r["내년평가대상"]))
         ]
 
-        # 올해 평가대상 경고
+        # 올해/내년 평가대상 경고
         target_list = [r for r in filtered_c if r["올해평가대상"]]
+        next_list   = [r for r in filtered_c if r["내년평가대상"]]
         if target_list:
-            st.warning(f"⚠️ **올해 평가대상 {len(target_list)}개 지점** — 유효기간 만료 또는 인증유예")
+            st.error(f"🔴 **{THIS_YEAR}년 평가대상 {len(target_list)}개 지점** — 올해 평가 필요")
+        if next_list:
+            st.warning(f"⚠️ **{THIS_YEAR+1}년 평가대상 {len(next_list)}개 지점** — 내년 평가 예정")
 
         # 테이블
         disp_rows = []
@@ -1085,7 +1165,8 @@ with tab5:
                 "계열":         r["계열"],
                 "지점":         r["지점"],
                 "평가등급":     r["평가등급"],
-                "올해대상":     "🔴 대상" if r["올해평가대상"] else "",
+                "다음평가":     str(r["다음평가연도"]) if r["다음평가연도"] else "",
+                "평가대상":     "🔴 올해" if r["올해평가대상"] else ("⚠️ 내년" if r["내년평가대상"] else ""),
                 "역량평가총점": r["역량평가총점"],
                 "훈련성과총점": r["훈련성과총점"],
                 "실업점수":     r["실업점수"],
