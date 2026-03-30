@@ -234,6 +234,58 @@ def serialize_비용단위기간(data):
                     for k, v in sorted(data.items()))
 
 # ── 메신저 파싱 헬퍼 함수들 ──────────────────────
+STAFF_GSHEET_ID = "15aSWtgjDiKUJPtVwPA0H8De6dlRc6LitFcW8H8KkBJk"
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_staff_from_gsheets(sheet_id):
+    """Google Sheets 공개 CSV에서 담당자 현황 자동 로드 (링크 공유 보기 권한 필요)"""
+    try:
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+        df = pd.read_csv(url, header=None, dtype=str).fillna("")
+        staff_map = {}
+        cur_dept = ""
+        # 헤더 행 찾기 (성명 컬럼이 있는 행)
+        header_row = None
+        for i, row in df.iterrows():
+            if "성명" in row.values:
+                header_row = i
+                break
+        if header_row is None:
+            return {}
+        headers = list(df.iloc[header_row])
+        def fc(name):  # find column index
+            for j, h in enumerate(headers):
+                if name in str(h): return j
+            return -1
+        dept_col   = fc("부서")
+        region_col = fc("지역")
+        name_col   = fc("성명")
+        status_col = fc("재직여부")
+        mgr_col    = fc("담당자")
+        # 담당자 재직여부: 재직여부가 2개 있으면 두 번째 인덱스
+        status2_col = -1
+        for j, h in enumerate(headers):
+            if "재직여부" in str(h) and j != status_col:
+                status2_col = j; break
+        for i in range(header_row + 1, len(df)):
+            row = df.iloc[i]
+            dept_v = row.iloc[dept_col].strip() if dept_col >= 0 else ""
+            if dept_v and dept_v not in ("-","합계","소계"):
+                cur_dept = dept_v
+            지역 = row.iloc[region_col].strip() if region_col >= 0 else ""
+            성명 = row.iloc[name_col].strip() if name_col >= 0 else ""
+            재직 = row.iloc[status_col].strip().upper() if status_col >= 0 else ""
+            if 성명 and 지역 and 재직 != "X":
+                staff_map[성명] = (cur_dept, 지역)
+            if mgr_col >= 0:
+                담당자 = row.iloc[mgr_col].strip()
+                담당재직 = row.iloc[status2_col].strip().upper() if status2_col >= 0 else ""
+                if 담당자 and 지역 and 담당재직 != "X":
+                    staff_map[담당자] = (cur_dept, 지역)
+        return staff_map
+    except Exception:
+        return {}
+
 @st.cache_data(show_spinner=False)
 def parse_staff_file(file_bytes):
     """지점 담당자 현황 파싱 → {이름: (계열, 지점)} 매핑"""
@@ -611,30 +663,23 @@ if recruit_file:
     else:
         recruit_bytes = recruit_file.read()
 
-# ── 사이드바: 담당자 현황 파일 ──────────────────
+# ── 담당자 현황: Google Sheets 자동 로드 ─────────
+staff_map = load_staff_from_gsheets(STAFF_GSHEET_ID)
+
 with st.sidebar:
     st.markdown("### 👤 지점 담당자 현황")
-    AUTO_STAFF = "staff.xlsx"
-    if os.path.exists(AUTO_STAFF):
-        st.success("✅ staff.xlsx 자동 로드됨", icon="👤")
-        staff_file = AUTO_STAFF
-        s_override = st.file_uploader("담당자 파일 교체", type=["xlsx","XLSX"], key="staff_up")
-        if s_override: staff_file = s_override
+    if staff_map:
+        st.success(f"✅ 담당자 {len(staff_map)}명 자동 로드 (Google Sheets)", icon="👤")
     else:
-        staff_file = st.file_uploader(
-            "지점 담당자 현황 엑셀 업로드", type=["xlsx","XLSX"], key="staff_up"
-        )
-
-staff_map = {}
-if staff_file:
-    if isinstance(staff_file, str):
-        with open(staff_file,"rb") as f: staff_bytes = f.read()
-    else:
-        staff_bytes = staff_file.read()
-    try:
-        staff_map = parse_staff_file(staff_bytes)
-    except Exception:
-        staff_map = {}
+        st.warning("Google Sheets에서 담당자 로드 실패\n\n(시트 공유 설정 확인 또는 파일 직접 업로드)", icon="⚠️")
+    # 수동 업로드로 덮어쓰기 가능
+    s_override = st.file_uploader("담당자 파일 직접 업로드 (선택)", type=["xlsx","XLSX"], key="staff_up")
+    if s_override:
+        try:
+            staff_map = parse_staff_file(s_override.read())
+            st.success(f"✅ 파일에서 {len(staff_map)}명 로드됨", icon="📁")
+        except Exception:
+            st.error("파일 파싱 실패")
 
 # ── Google Sheets 데이터 로드 (또는 session_state) ──
 if sheet:
@@ -684,10 +729,9 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ════════════════════════════════════════════════
 # 탭 구성
 # ════════════════════════════════════════════════
-tab0, tab1, tab_msg, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab0, tab_msg, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📋 개설 계획",
-    "🎯 모집현황 입력",
-    "📨 메신저 파싱",
+    "📨 모집현황(메신저 분류)",
     "📊 모집현황 조회",
     "🔍 과정 추적 관리",
     "🔴 반납 분석",
@@ -897,45 +941,48 @@ with tab0:
             use_container_width=True, hide_index=True,
         )
 
+
 # ══════════════════════════════════════════════
-# TAB 1 : 모집현황 입력 (직접 입력 폼)
+# TAB MSG : 메신저 파싱
 # ══════════════════════════════════════════════
-with tab1:
-    st.markdown("#### 주차별 모집현황 입력")
+with tab_msg:
+    st.markdown("#### 📨 모집현황 입력")
+    st.caption("메신저로 받은 보고 내용을 붙여넣으면 자동 파싱 → DB 저장 → 엑셀 다운로드까지 한번에 처리합니다.")
 
     # ── 기개강 과정 일괄 등록 ──────────────────────
     if recruit_bytes:
-        with st.expander("📥 기개강 과정 일괄 등록 (모집현황 파일에서 자동 가져오기)", expanded=False):
+        with st.expander("📥 기개강 과정 일괄 등록 (모집현황 누적 파일 기반)", expanded=False):
             today_str = datetime.now().strftime("%Y-%m-%d")
             rec26 = parse_recruit_sheet(recruit_bytes, "26년")
             past_courses = [r for r in rec26 if r["시작일"] and r["시작일"] <= today_str]
-            st.caption(f"26년 시트에서 이미 개강한 과정 **{len(past_courses)}건** 발견 (기준일: {today_str})")
+            already = sum(1 for r in past_courses
+                          if course_key(r["지점"], r["과정명"], r["회차"]) in db)
+            st.caption(f"26년 시트 기개강 **{len(past_courses)}건** (기준일: {today_str}) — 이미 등록: {already}건")
             if past_courses:
                 preview_df = pd.DataFrame([{
                     "월": r["월"], "계열": r["계열"], "지점": r["지점"],
                     "과정명": r["과정명"][:30], "시작일": r["시작일"],
                     "정원": r["정원"], "확정인원": r["확정인원"], "신청인원": r["신청인원"],
-                    "모집률(%)": round(r["모집률"]*100,1), "신청률(%)": round(r["신청률"]*100,1),
+                    "모집률(%)": round(r["모집률"]*100, 1),
+                    "신청률(%)": round(r["신청률"]*100, 1),
+                    "등록여부": "✅" if course_key(r["지점"],r["과정명"],r["회차"]) in db else "❌",
                 } for r in past_courses])
                 st.dataframe(preview_df, use_container_width=True, hide_index=True)
-                if st.button("💾 전체 일괄 등록 (개강확정 처리)", type="primary"):
+                if st.button("💾 미등록 과정 일괄 등록 (개강확정)", type="primary", key="bulk_reg"):
                     imported = 0
                     for r in past_courses:
                         k = course_key(r["지점"], r["과정명"], r["회차"])
+                        if k in db:
+                            continue
                         record = {
-                            "key": k,
-                            "계열": r["계열"], "지점": r["지점"],
+                            "key": k, "계열": r["계열"], "지점": r["지점"],
                             "훈련종류": r["훈련종류"], "과정명": r["과정명"],
                             "시작일": r["시작일"], "종료일": r["종료일"],
-                            "정원": r["정원"],
-                            "기준주차": r["월"],
-                            "확정인원": r["확정인원"],
-                            "신청인원": r["신청인원"],
-                            "모집률": r["모집률"],
-                            "신청률": r["신청률"],
-                            "개설상태": "개강확정",
-                            "연기사유": "", "모집비고": "누적파일 자동등록",
-                            "이수자평가예정": "", "이수자평가신청일": "",
+                            "정원": r["정원"], "기준주차": r["월"],
+                            "확정인원": r["확정인원"], "신청인원": r["신청인원"],
+                            "모집률": r["모집률"], "신청률": r["신청률"],
+                            "개설상태": "개강확정", "연기사유": "", "모집비고": "누적파일 자동등록",
+                            "이수자평가예정":"","이수자평가신청일":"",
                             "평가완료":"","평가완료일":"","평가비고":"",
                             "비용단위기간":"","비용신청":"","비용금액":0,
                             "비용신청일":"","비용비고":"",
@@ -947,211 +994,9 @@ with tab1:
                         if not sheet: st.session_state.local_db[k] = record
                         db[k] = record
                         imported += 1
-                    st.success(f"✅ {imported}개 과정 개강확정으로 등록 완료!")
+                    st.success(f"✅ {imported}개 과정 등록 완료!")
                     st.rerun()
-    else:
-        st.info("사이드바에서 모집현황 누적 파일을 업로드하면 기개강 과정을 자동으로 불러올 수 있습니다.", icon="💡")
-
-    if not sheet:
-        st.warning(
-            "Google Sheets가 연결되지 않아 저장된 데이터가 **브라우저 새로고침 시 초기화**됩니다.\n\n"
-            "팀 공유를 위해 Google Sheets 설정을 완료해주세요.",
-            icon="⚠️",
-        )
-
-    # ── 주차 / 계열 / 지점 선택 ──────────────────
-    SERIES_OPTS = ["— 계열 선택 —", "IT", "컴퓨터", "게임", "뷰티", "요리", "승무원"]
-    hdr1, hdr2, hdr3 = st.columns([1, 1, 1])
-    with hdr1:
-        week_label = st.text_input("기준 주차", placeholder="예: 3월3주",
-                                   value=st.session_state.get("last_week",""))
-    with hdr2:
-        선택계열 = st.selectbox("계열 선택", SERIES_OPTS)
-    with hdr3:
-        branch_opts = SERIES_BRANCHES.get(선택계열, [])
-        if branch_opts:
-            raw_지점 = st.selectbox("지점 선택", ["— 지점 선택 —"] + branch_opts)
-            선택지점 = raw_지점 if raw_지점 != "— 지점 선택 —" else ""
-        else:
-            선택지점 = st.text_input("지점명 입력", placeholder="예: 강남, 홍대 등")
-
-    if 선택계열 == "— 계열 선택 —" or not 선택지점.strip():
-        st.info("계열과 지점을 선택하면 해당 과정 목록이 표시됩니다.")
-    else:
-        선택지점 = 선택지점.strip()
-        # 계열과 지점으로 필터 (지점 표기: "컴퓨터 강남" 형식 또는 엑셀 지점명 부분일치)
-        지점과정 = [
-            c for c in courses
-            if (선택계열 in (c.get("계열") or "") or f"{선택계열} {선택지점}" in (c.get("지점") or ""))
-            and 선택지점 in (c.get("지점") or "")
-        ]
-        if not 지점과정:
-            지점과정 = [c for c in courses if 선택지점 in (c.get("지점") or "")]
-        if not 지점과정:
-            st.warning(f"'{선택지점}' 지점의 과정이 연간계획에 없습니다.")
-        else:
-            # 상태 아이콘 색 구분 설명
-            st.caption(f"⬜ 준비중  ✅ 개강확정  🔄 개강연기  ✖ 폐강  |  총 {len(지점과정)}개 과정")
-            st.markdown("---")
-
-            STATE_OPTS = ["준비중", "개강확정", "개강연기", "폐강"]
-            입력결과 = []
-
-            for i, c in enumerate(지점과정):
-                key_c = course_key(c["지점"], c["과정명"], c.get("운영회차","1"))
-                ex = db.get(key_c, {})
-
-                # 현재 상태 아이콘
-                cur_state = ex.get("개설상태", "개강확정")
-                icon = "✅" if cur_state == "개강확정" else \
-                       "🔄" if cur_state == "개강연기" else \
-                       "✖" if cur_state == "폐강" else \
-                       "⬜" if cur_state == "준비중" else "⬜"
-
-                date_str = ""
-                try:
-                    s_d = fmt_mmdd(c.get("시작일",""))
-                    e_d = fmt_mmdd(c.get("종료일",""))
-                    if s_d and e_d:
-                        date_str = f" ({s_d}~{e_d})"
-                except Exception:
-                    pass
-
-                with st.expander(
-                    f"{icon}  **{c['과정명']}**  —  정원 {c['정원']}명{date_str}",
-                    expanded=(cur_state != "개강확정" or not ex)
-                ):
-                    c1, c2, c3 = st.columns([1, 1, 2])
-                    with c1:
-                        확정 = st.number_input(
-                            "확정인원", min_value=0,
-                            value=int(ex.get("확정인원", 0) or 0),
-                            key=f"cf1_{i}"
-                        )
-                        신청 = st.number_input(
-                            "신청인원", min_value=0,
-                            value=int(ex.get("신청인원", 0) or 0),
-                            key=f"ap1_{i}"
-                        )
-                    with c2:
-                        정원 = c["정원"] or 1
-                        모집률 = 확정 / 정원 * 100
-                        신청률 = 신청 / 정원 * 100
-                        mr_color = "red" if 모집률 < 65 else "green"
-                        sr_color = "red" if 신청률 < 70 else "green"
-                        st.markdown(
-                            f"<br><span style='color:{mr_color};font-weight:700'>모집률 {모집률:.0f}%</span><br>"
-                            f"<span style='color:{sr_color};font-weight:700'>신청률 {신청률:.0f}%</span>",
-                            unsafe_allow_html=True
-                        )
-                    with c3:
-                        state_idx = STATE_OPTS.index(cur_state) if cur_state in STATE_OPTS else 0
-                        상태 = st.selectbox(
-                            "개설상태", STATE_OPTS,
-                            index=state_idx, key=f"st1_{i}"
-                        )
-                        사유 = st.text_input(
-                            "연기/폐강 사유",
-                            value=ex.get("연기사유", ""),
-                            key=f"rs1_{i}",
-                            placeholder="연기 또는 폐강 사유 입력"
-                        )
-
-                    비고 = st.text_input(
-                        "비고", value=ex.get("모집비고", ""),
-                        key=f"nt1_{i}", placeholder="기타 메모"
-                    )
-
-                    st.markdown("---")
-                    ev_예정 = st.checkbox(
-                        "📝 이수자 평가 예정",
-                        value=str(ex.get("이수자평가예정","")) == "True",
-                        key=f"evp_{i}"
-                    )
-                    ev_신청일_val = None
-                    ev_결과_val = ""
-                    if ev_예정:
-                        ev_c1, ev_c2 = st.columns(2)
-                        with ev_c1:
-                            try:
-                                ev_default = datetime.strptime(ex["이수자평가신청일"],"%Y-%m-%d").date() \
-                                    if ex.get("이수자평가신청일") else datetime.today().date()
-                            except Exception:
-                                ev_default = datetime.today().date()
-                            ev_신청일_val = st.date_input("신청 예정일", value=ev_default, key=f"evd_{i}")
-                        with ev_c2:
-                            ev_결과_val = st.text_input(
-                                "평가 결과", value=ex.get("평가비고",""),
-                                key=f"evr_{i}", placeholder="예: 합격 / 진행중 / 불합격"
-                            )
-
-                    입력결과.append({
-                        "course": c, "key": key_c,
-                        "확정": 확정, "신청": 신청,
-                        "모집률": round(확정 / 정원, 4) if 정원 > 0 else 0,
-                        "신청률": round(신청 / 정원, 4) if 정원 > 0 else 0,
-                        "상태": 상태, "사유": 사유, "비고": 비고,
-                        "이수자평가예정": ev_예정,
-                        "이수자평가신청일": ev_신청일_val.strftime("%Y-%m-%d") if ev_신청일_val else "",
-                        "평가비고": ev_결과_val,
-                    })
-
-            st.markdown("---")
-            if st.button("💾 전체 저장", type="primary", use_container_width=True):
-                if not week_label.strip():
-                    st.error("기준 주차를 입력해주세요 (예: 3월3주)")
-                else:
-                    saved = 0
-                    for item in 입력결과:
-                        c = item["course"]
-                        k = item["key"]
-                        record = {
-                            "key": k,
-                            "계열": c["계열"], "지점": c["지점"],
-                            "훈련종류": c["훈련종류"], "과정명": c["과정명"],
-                            "시작일": str(c["시작일"]), "종료일": str(c["종료일"]),
-                            "정원": c["정원"],
-                            "기준주차": week_label.strip(),
-                            "확정인원": item["확정"],
-                            "신청인원": item["신청"],
-                            "모집률": item["모집률"],
-                            "신청률": item["신청률"],
-                            "개설상태": item["상태"],
-                            "연기사유": item["사유"],
-                            "모집비고": item["비고"],
-                            "이수자평가예정":   str(item.get("이수자평가예정", False)),
-                            "이수자평가신청일": item.get("이수자평가신청일",""),
-                            "평가완료":    db.get(k, {}).get("평가완료",""),
-                            "평가완료일":  db.get(k, {}).get("평가완료일",""),
-                            "평가비고":    item.get("평가비고","") or db.get(k, {}).get("평가비고",""),
-                            "비용신청":    db.get(k, {}).get("비용신청",""),
-                            "비용금액":    db.get(k, {}).get("비용금액",""),
-                            "비용신청일":  db.get(k, {}).get("비용신청일",""),
-                            "비용비고":    db.get(k, {}).get("비용비고",""),
-                            "취업_이수자": db.get(k, {}).get("취업_이수자",""),
-                            "취업_취업자": db.get(k, {}).get("취업_취업자",""),
-                            "취업_조사일": db.get(k, {}).get("취업_조사일",""),
-                            "취업비고":    db.get(k, {}).get("취업비고",""),
-                            "만족도점수":  db.get(k, {}).get("만족도점수",""),
-                            "만족도조사일":db.get(k, {}).get("만족도조사일",""),
-                            "만족도비고":  db.get(k, {}).get("만족도비고",""),
-                            "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        }
-                        save_record(k, record)
-                        if not sheet:
-                            st.session_state.local_db[k] = record
-                        db[k] = record
-                        saved += 1
-                    st.session_state["last_week"] = week_label.strip()
-                    st.success(f"✅ {saved}개 과정 저장 완료! ({선택지점} / {week_label})")
-                    st.rerun()
-
-# ══════════════════════════════════════════════
-# TAB MSG : 메신저 파싱
-# ══════════════════════════════════════════════
-with tab_msg:
-    st.markdown("#### 📨 모집현황 메신저 파싱")
-    st.caption("지점 담당자가 메신저로 보낸 보고 내용을 붙여넣으면 자동으로 표로 정리하고 엑셀로 내려받을 수 있습니다.")
+    st.markdown("---")
 
     col_wk, col_info = st.columns([1, 2])
     with col_wk:
@@ -1265,17 +1110,68 @@ with tab_msg:
             parsed[idx]["비고"] = nt
 
         st.markdown("---")
-        if week_label_m.strip():
-            excel_bytes = export_messenger_excel(parsed, week_label_m.strip())
-            st.download_button(
-                label=f"📥 엑셀 다운로드 — (개설과정 조사) {week_label_m}.xlsx",
-                data=excel_bytes,
-                file_name=f"(개설과정 조사) {week_label_m}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        else:
-            st.info("기준 주차를 입력하면 엑셀 다운로드 버튼이 활성화됩니다.", icon="💡")
+        save_col, dl_col = st.columns(2)
+        with save_col:
+            if st.button("💾 DB에 저장 (모집현황 반영)", type="primary", use_container_width=True, key="msg_save"):
+                if not week_label_m.strip():
+                    st.error("기준 주차를 먼저 입력해주세요.")
+                else:
+                    saved_cnt = 0
+                    for r in parsed:
+                        정원 = int(r.get("정원") or 0)
+                        확정 = int(r.get("확정인원") or 0)
+                        신청 = int(r.get("신청인원") or 0)
+                        k = course_key(r.get("지점",""), r.get("과정명",""), "1")
+                        existing = db.get(k, {})
+                        record = {
+                            "key": k,
+                            "계열": r.get("계열",""), "지점": r.get("지점",""),
+                            "훈련종류": r.get("훈련종류",""), "과정명": r.get("과정명",""),
+                            "시작일": r.get("시작일",""), "종료일": r.get("종료일",""),
+                            "정원": 정원,
+                            "기준주차": week_label_m.strip(),
+                            "확정인원": 확정, "신청인원": 신청,
+                            "모집률": round(확정/정원, 4) if 정원 > 0 else 0,
+                            "신청률": round(신청/정원, 4) if 정원 > 0 else 0,
+                            "개설상태": "개강확정",
+                            "연기사유": "", "모집비고": r.get("비고",""),
+                            "이수자평가예정": existing.get("이수자평가예정",""),
+                            "이수자평가신청일": existing.get("이수자평가신청일",""),
+                            "평가완료": existing.get("평가완료",""),
+                            "평가완료일": existing.get("평가완료일",""),
+                            "평가비고": existing.get("평가비고",""),
+                            "비용단위기간": existing.get("비용단위기간",""),
+                            "비용신청": existing.get("비용신청",""),
+                            "비용금액": existing.get("비용금액",0),
+                            "비용신청일": existing.get("비용신청일",""),
+                            "비용비고": existing.get("비용비고",""),
+                            "취업_이수자": existing.get("취업_이수자",""),
+                            "취업_취업자": existing.get("취업_취업자",""),
+                            "취업_조사일": existing.get("취업_조사일",""),
+                            "취업비고": existing.get("취업비고",""),
+                            "만족도점수": existing.get("만족도점수",""),
+                            "만족도조사일": existing.get("만족도조사일",""),
+                            "만족도비고": existing.get("만족도비고",""),
+                            "업데이트": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        }
+                        save_record(k, record)
+                        if not sheet: st.session_state.local_db[k] = record
+                        db[k] = record
+                        saved_cnt += 1
+                    st.success(f"✅ {saved_cnt}개 과정 DB 저장 완료! ({week_label_m})")
+                    st.rerun()
+        with dl_col:
+            if week_label_m.strip():
+                excel_bytes = export_messenger_excel(parsed, week_label_m.strip())
+                st.download_button(
+                    label=f"📥 엑셀 다운로드",
+                    data=excel_bytes,
+                    file_name=f"(개설과정 조사) {week_label_m}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            else:
+                st.info("기준 주차 입력 시 엑셀 다운로드 활성화", icon="💡")
 
 # ══════════════════════════════════════════════
 # TAB 2 : 모집현황 조회
