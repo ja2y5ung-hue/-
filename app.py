@@ -238,53 +238,80 @@ STAFF_GSHEET_ID = "15aSWtgjDiKUJPtVwPA0H8De6dlRc6LitFcW8H8KkBJk"
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_staff_from_gsheets(sheet_id):
-    """Google Sheets 공개 CSV에서 담당자 현황 자동 로드 (링크 공유 보기 권한 필요)"""
+    """Google Sheets 공개 CSV에서 담당자 현황 자동 로드
+    컬럼 구조: NO, 계열, 지점, 국비(담당자명), 입사일, 근무개월수, 취업(담당자명), ...
+    """
     try:
+        import urllib.request
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-        df = pd.read_csv(url, header=None, dtype=str).fillna("")
-        staff_map = {}
-        cur_dept = ""
-        # 헤더 행 찾기 (성명 컬럼이 있는 행)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8")
+        from io import StringIO
+        df = pd.read_csv(StringIO(raw), header=None, dtype=str).fillna("")
+
+        # 헤더 행 찾기 (계열, 지점 컬럼이 있는 행)
         header_row = None
         for i, row in df.iterrows():
-            if "성명" in row.values:
+            vals = list(row.values)
+            if "계열" in vals and "지점" in vals:
                 header_row = i
                 break
         if header_row is None:
-            return {}
+            return {"__error__": "헤더(계열/지점 컬럼)를 찾을 수 없습니다."}
+
         headers = list(df.iloc[header_row])
-        def fc(name):  # find column index
+        def fc(name):
             for j, h in enumerate(headers):
-                if name in str(h): return j
+                if name == str(h).strip(): return j
             return -1
-        dept_col   = fc("부서")
-        region_col = fc("지역")
-        name_col   = fc("성명")
-        status_col = fc("재직여부")
-        mgr_col    = fc("담당자")
-        # 담당자 재직여부: 재직여부가 2개 있으면 두 번째 인덱스
-        status2_col = -1
-        for j, h in enumerate(headers):
-            if "재직여부" in str(h) and j != status_col:
-                status2_col = j; break
+
+        계열_col = fc("계열")
+        지점_col  = fc("지점")
+        국비_col  = fc("국비")   # 국비 담당자명
+        취업_col  = fc("취업")   # 취업 담당자명
+
+        def extract_name(cell):
+            """'김남희 대리', '장연정 사원\n (육아휴직...)' 등에서 이름만 추출"""
+            cell = str(cell).strip().split("\n")[0].strip()
+            parts = cell.split()
+            if parts:
+                return parts[0]  # 첫 단어 = 이름
+            return ""
+
+        staff_map = {}
+        cur_계열 = ""
+        cur_지점 = ""
+
         for i in range(header_row + 1, len(df)):
             row = df.iloc[i]
-            dept_v = row.iloc[dept_col].strip() if dept_col >= 0 else ""
-            if dept_v and dept_v not in ("-","합계","소계"):
-                cur_dept = dept_v
-            지역 = row.iloc[region_col].strip() if region_col >= 0 else ""
-            성명 = row.iloc[name_col].strip() if name_col >= 0 else ""
-            재직 = row.iloc[status_col].strip().upper() if status_col >= 0 else ""
-            if 성명 and 지역 and 재직 != "X":
-                staff_map[성명] = (cur_dept, 지역)
-            if mgr_col >= 0:
-                담당자 = row.iloc[mgr_col].strip()
-                담당재직 = row.iloc[status2_col].strip().upper() if status2_col >= 0 else ""
-                if 담당자 and 지역 and 담당재직 != "X":
-                    staff_map[담당자] = (cur_dept, 지역)
+            계열_v = row.iloc[계열_col].strip() if 계열_col >= 0 else ""
+            지점_v = row.iloc[지점_col].strip() if 지점_col >= 0 else ""
+
+            # 계열/지점 이어받기 (빈 행은 이전 값 유지)
+            if 계열_v and 계열_v not in ("nan","합계","소계","계열"):
+                cur_계열 = 계열_v
+            if 지점_v and 지점_v not in ("nan","합계","소계","지점"):
+                cur_지점 = 지점_v
+
+            if not cur_지점 or not cur_계열:
+                continue
+
+            # 국비 담당자
+            if 국비_col >= 0:
+                name = extract_name(row.iloc[국비_col])
+                if name and name not in ("nan","국비","-"):
+                    staff_map[name] = (cur_계열, cur_지점)
+
+            # 취업 담당자
+            if 취업_col >= 0:
+                name = extract_name(row.iloc[취업_col])
+                if name and name not in ("nan","취업","-"):
+                    staff_map[name] = (cur_계열, cur_지점)
+
         return staff_map
-    except Exception:
-        return {}
+    except Exception as e:
+        return {"__error__": str(e)}
 
 @st.cache_data(show_spinner=False)
 def parse_staff_file(file_bytes):
@@ -668,10 +695,17 @@ staff_map = load_staff_from_gsheets(STAFF_GSHEET_ID)
 
 with st.sidebar:
     st.markdown("### 👤 지점 담당자 현황")
-    if staff_map:
-        st.success(f"✅ 담당자 {len(staff_map)}명 자동 로드 (Google Sheets)", icon="👤")
+    _err = staff_map.get("__error__") if isinstance(staff_map, dict) else None
+    _real_map = {k: v for k, v in staff_map.items() if k != "__error__"} if isinstance(staff_map, dict) else {}
+    if _real_map:
+        st.success(f"✅ 담당자 {len(_real_map)}명 자동 로드 (Google Sheets)", icon="👤")
+        staff_map = _real_map
     else:
-        st.warning("Google Sheets에서 담당자 로드 실패\n\n(시트 공유 설정 확인 또는 파일 직접 업로드)", icon="⚠️")
+        if _err:
+            st.error(f"로드 실패: {_err}", icon="⚠️")
+        else:
+            st.warning("담당자 데이터 없음 — 파일 직접 업로드해주세요", icon="⚠️")
+        staff_map = {}
     # 수동 업로드로 덮어쓰기 가능
     s_override = st.file_uploader("담당자 파일 직접 업로드 (선택)", type=["xlsx","XLSX"], key="staff_up")
     if s_override:
