@@ -1115,41 +1115,58 @@ with tab_msg:
                 )
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 결과 테이블
-        display_cols = ["보고자","계열","지점","훈련종류","과정명","시작일","종료일","훈련일수","훈련시간","정원","확정인원","신청인원","모집률(%)","신청률(%)","강의장","매칭과정명","비고"]
-        df_p = pd.DataFrame(parsed)[display_cols]
-
-        def style_msg_row(row):
-            if row.get("정원", 0) == 0:
-                return ["background:#f7fafc"] * len(row)
-            if row.get("모집률(%)", 0) < 65:
-                return ["background:#fff5f5"] * len(row)
-            return [""] * len(row)
-
-        styled_p = (
-            df_p.style
-            .format({"모집률(%)": "{:.1f}", "신청률(%)": "{:.1f}"})
-            .apply(style_msg_row, axis=1)
-            .map(lambda v: "color:#e53e3e;font-weight:700" if isinstance(v,(int,float)) and v < 65 else
-                           "color:#276749;font-weight:700" if isinstance(v,(int,float)) and v >= 65 else "",
-                 subset=["모집률(%)"])
-            .map(lambda v: "color:#e53e3e;font-weight:700" if isinstance(v,(int,float)) and v < 70 else
-                           "color:#276749;font-weight:700" if isinstance(v,(int,float)) and v >= 70 else "",
-                 subset=["신청률(%)"])
+        # 결과 테이블 (직접 수정 가능)
+        st.markdown("**📝 파싱 결과 — 셀을 클릭해 직접 수정 가능합니다**")
+        edit_cols = ["보고자","계열","지점","훈련종류","과정명","시작일","종료일","훈련일수","훈련시간","정원","확정인원","신청인원","모집률(%)","신청률(%)","강의장","매칭과정명","비고"]
+        df_edit = pd.DataFrame(parsed)[edit_cols].copy()
+        # 모집률/신청률은 재계산 표시용 (편집 불가)
+        edited_df = st.data_editor(
+            df_edit,
+            use_container_width=True,
+            hide_index=True,
+            key="parsed_editor",
+            column_config={
+                "보고자":    st.column_config.TextColumn("보고자",    disabled=True, width="small"),
+                "계열":      st.column_config.TextColumn("계열",      width="small"),
+                "지점":      st.column_config.TextColumn("지점",      width="small"),
+                "훈련종류":  st.column_config.TextColumn("훈련종류",  width="small"),
+                "과정명":    st.column_config.TextColumn("과정명",    width="large"),
+                "시작일":    st.column_config.TextColumn("시작일",    width="small"),
+                "종료일":    st.column_config.TextColumn("종료일",    width="small"),
+                "훈련일수":  st.column_config.TextColumn("훈련일수",  width="small"),
+                "훈련시간":  st.column_config.TextColumn("훈련시간",  width="medium"),
+                "정원":      st.column_config.NumberColumn("정원",    width="small", min_value=0, step=1),
+                "확정인원":  st.column_config.NumberColumn("확정인원",width="small", min_value=0, step=1),
+                "신청인원":  st.column_config.NumberColumn("신청인원",width="small", min_value=0, step=1),
+                "모집률(%)": st.column_config.NumberColumn("모집률(%)",disabled=True, width="small", format="%.1f"),
+                "신청률(%)": st.column_config.NumberColumn("신청률(%)",disabled=True, width="small", format="%.1f"),
+                "강의장":    st.column_config.TextColumn("강의장",    width="medium"),
+                "매칭과정명":st.column_config.TextColumn("매칭과정명",disabled=True, width="large"),
+                "비고":      st.column_config.TextColumn("비고",      width="medium"),
+            },
         )
-        st.dataframe(styled_p, use_container_width=True, hide_index=True)
-
-        # 비고 직접 수정
-        st.markdown("**비고 추가 (선택사항)**")
-        for idx, r in enumerate(parsed):
-            nt = st.text_input(
-                f"{r['지점']} · {r['과정명'][:25]}",
-                value=r.get("비고",""),
-                key=f"msg_nt_{idx}",
-                label_visibility="collapsed",
-                placeholder=f"[{r['지점']}] {r['과정명'][:25]} — 비고 입력"
-            )
-            parsed[idx]["비고"] = nt
+        # 수정된 내용을 parsed에 반영 (모집률/신청률 재계산)
+        for idx, row in edited_df.iterrows():
+            정원_e  = int(row.get("정원",0)    or 0)
+            확정_e  = int(row.get("확정인원",0) or 0)
+            신청_e  = int(row.get("신청인원",0) or 0)
+            parsed[idx].update({
+                "계열":     row.get("계열",""),
+                "지점":     row.get("지점",""),
+                "훈련종류": row.get("훈련종류",""),
+                "과정명":   row.get("과정명",""),
+                "시작일":   row.get("시작일",""),
+                "종료일":   row.get("종료일",""),
+                "훈련일수": row.get("훈련일수",""),
+                "훈련시간": row.get("훈련시간",""),
+                "정원":     정원_e,
+                "확정인원": 확정_e,
+                "신청인원": 신청_e,
+                "모집률(%)": round(확정_e/정원_e*100, 1) if 정원_e > 0 else 0,
+                "신청률(%)": round(신청_e/정원_e*100, 1) if 정원_e > 0 else 0,
+                "강의장":   row.get("강의장",""),
+                "비고":     row.get("비고",""),
+            })
 
         st.markdown("---")
         save_col, dl_col = st.columns(2)
