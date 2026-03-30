@@ -383,10 +383,12 @@ def parse_date_range(text_val):
 
 def split_course_blocks(text):
     """메신저 텍스트에서 과정 블록 분리"""
+    # 훈련과정명 / 과정명 모두 지원
+    course_name_pat = r'(?:훈련\s*)?(?:과\s*정\s*명|과정명)'
     pat = re.compile(
-        r'(?:(?:^|\n)\s*\d+\s*[.·]\s*(?:과\s*정\s*명|과정명)\s*[:\：]|'
-        r'(?:^|\n)\s*\[\s*(?:과\s*정\s*명|과정명)\s*[:\：]|'
-        r'(?:^|\n)\s*(?:과\s*정\s*명|과정명)\s*[:\：])',
+        r'(?:(?:^|\n)\s*\d+\s*[.·]\s*' + course_name_pat + r'\s*[:\：]|'
+        r'(?:^|\n)\s*\[\s*' + course_name_pat + r'\s*[:\：]|'
+        r'(?:^|\n)\s*' + course_name_pat + r'\s*[:\：])',
         re.MULTILINE
     )
     positions = [m.start() for m in pat.finditer(text)]
@@ -405,18 +407,21 @@ def parse_one_course(block):
         line = line.strip().lstrip('-').lstrip('*').lstrip('·').strip()
         if not line:
             continue
-        m = re.search(r'(?:과\s*정\s*명|과정명)\s*[:\：]\s*(.*)', line)
+        # 과정명 (훈련과정명 포함)
+        m = re.search(r'(?:훈련\s*)?(?:과\s*정\s*명|과정명)\s*[:\：]\s*(.*)', line)
         if m:
             name = m.group(1).strip()
             name = re.sub(r'^\[', '', name).rstrip(']').strip()
             result["과정명"] = name
             continue
-        m = re.search(r'(?:훈련\s*기간|기\s*간)\s*[:\：]\s*(.*)', line)
+        # 훈련기간 (총일수) 형식 포함
+        m = re.search(r'(?:훈련\s*기간|기\s*간)[^:\：]*[:\：]\s*(.*)', line)
         if m:
             s, e = parse_date_range(m.group(1))
             result["시작일"] = s; result["종료일"] = e
             continue
-        m = re.search(r'훈련\s*시간\s*[:\：]\s*(.*)', line)
+        # 훈련시간 (1일 훈련시간/총훈련시간) 형식 포함
+        m = re.search(r'훈련\s*시간[^:\：]*[:\：]\s*(.*)', line)
         if m:
             result["훈련시간"] = m.group(1).strip()
             continue
@@ -424,6 +429,7 @@ def parse_one_course(block):
         if m:
             result["강의장"] = m.group(1).strip()
             continue
+        # 정원 (모집인원 포함)
         m = re.search(r'(?:모집\s*인원|정\s*원)\s*[:\：]\s*(.*)', line)
         if m:
             result["모집인원"] = extract_number(m.group(1))
