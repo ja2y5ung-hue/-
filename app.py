@@ -1131,6 +1131,7 @@ with tab_msg:
             df_edit,
             use_container_width=True,
             hide_index=True,
+            num_rows="dynamic",
             key="parsed_editor",
             column_config={
                 "보고자":    st.column_config.TextColumn("보고자",    disabled=True, width="small"),
@@ -1152,28 +1153,35 @@ with tab_msg:
                 "비고":      st.column_config.TextColumn("비고",      width="medium"),
             },
         )
-        # 수정된 내용을 parsed에 반영 (모집률/신청률 재계산)
-        for idx, row in edited_df.iterrows():
-            정원_e  = int(row.get("정원",0)    or 0)
-            확정_e  = int(row.get("확정인원",0) or 0)
-            신청_e  = int(row.get("신청인원",0) or 0)
-            parsed[idx].update({
-                "계열":     row.get("계열",""),
-                "지점":     row.get("지점",""),
-                "훈련종류": row.get("훈련종류",""),
-                "과정명":   row.get("과정명",""),
-                "시작일":   row.get("시작일",""),
-                "종료일":   row.get("종료일",""),
-                "훈련일수": row.get("훈련일수",""),
-                "훈련시간": row.get("훈련시간",""),
+        # 수정/삭제된 내용을 session_state에 반영 (모집률/신청률 재계산)
+        new_parsed = []
+        for _, row in edited_df.iterrows():
+            if not str(row.get("과정명","")).strip():
+                continue  # 과정명 없는 행(삭제된 행) 제외
+            정원_e = int(row.get("정원", 0) or 0)
+            확정_e = int(row.get("확정인원", 0) or 0)
+            신청_e = int(row.get("신청인원", 0) or 0)
+            new_parsed.append({
+                "보고자":   str(row.get("보고자","")),
+                "계열":     str(row.get("계열","")),
+                "지점":     str(row.get("지점","")),
+                "훈련종류": str(row.get("훈련종류","")),
+                "과정명":   str(row.get("과정명","")),
+                "시작일":   str(row.get("시작일","")),
+                "종료일":   str(row.get("종료일","")),
+                "훈련일수": str(row.get("훈련일수","")),
+                "훈련시간": str(row.get("훈련시간","")),
                 "정원":     정원_e,
                 "확정인원": 확정_e,
                 "신청인원": 신청_e,
                 "모집률(%)": round(확정_e/정원_e*100, 1) if 정원_e > 0 else 0,
                 "신청률(%)": round(신청_e/정원_e*100, 1) if 정원_e > 0 else 0,
-                "강의장":   row.get("강의장",""),
-                "비고":     row.get("비고",""),
+                "강의장":   str(row.get("강의장","")),
+                "매칭과정명": str(row.get("매칭과정명","")),
+                "비고":     str(row.get("비고","")),
             })
+        st.session_state["parsed_results"] = new_parsed
+        parsed = new_parsed
 
         st.markdown("---")
         save_col, dl_col = st.columns(2)
