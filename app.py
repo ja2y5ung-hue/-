@@ -383,12 +383,11 @@ def parse_date_range(text_val):
 
 def split_course_blocks(text):
     """메신저 텍스트에서 과정 블록 분리"""
-    # 훈련과정명 / 과정명 모두 지원
+    # 훈련과정명 / 과정명 모두 지원, 앞에 - · * 숫자. [ 등 다양한 접두사 처리
     course_name_pat = r'(?:훈련\s*)?(?:과\s*정\s*명|과정명)'
+    prefix = r'(?:\d+\s*[.·]\s*|[-*·]\s*|\[\s*)?'   # 숫자., -, *, [, 없음
     pat = re.compile(
-        r'(?:(?:^|\n)\s*\d+\s*[.·]\s*' + course_name_pat + r'\s*[:\：]|'
-        r'(?:^|\n)\s*\[\s*' + course_name_pat + r'\s*[:\：]|'
-        r'(?:^|\n)\s*' + course_name_pat + r'\s*[:\：])',
+        r'(?:^|\n)\s*' + prefix + course_name_pat + r'[^:\：]*[:\：]',
         re.MULTILINE
     )
     positions = [m.start() for m in pat.finditer(text)]
