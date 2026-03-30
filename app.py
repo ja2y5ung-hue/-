@@ -486,7 +486,9 @@ def parse_messenger_all(text, staff_map, plan_courses):
             if not c["과정명"]:
                 continue
             plan = fuzzy_match_plan(c["과정명"], 지점, plan_courses)
-            정원 = c["모집인원"] or (int(plan.get("정원",0) or 0) if plan else 0)
+            # 연간개설계획 데이터 우선, 없을 때만 메신저 값 사용
+            plan_정원 = int(plan.get("정원",0) or 0) if plan else 0
+            정원 = plan_정원 or c["모집인원"]
             확정 = c["확정인원"]
             신청 = c["신청인원"]
             results.append({
@@ -494,11 +496,11 @@ def parse_messenger_all(text, staff_map, plan_courses):
                 "계열": 계열 or (plan.get("계열","") if plan else ""),
                 "지점": 지점 or (plan.get("지점","") if plan else ""),
                 "훈련종류": plan.get("훈련종류","") if plan else "",
-                "과정명": c["과정명"],
-                "시작일": c["시작일"] or (plan.get("시작일","") if plan else ""),
-                "종료일": c["종료일"] or (plan.get("종료일","") if plan else ""),
+                "과정명": (plan.get("과정명","") if plan else "") or c["과정명"],
+                "시작일": (plan.get("시작일","") if plan else "") or c["시작일"],
+                "종료일": (plan.get("종료일","") if plan else "") or c["종료일"],
                 "훈련일수": plan.get("훈련일수","") if plan else "",
-                "훈련시간": c["훈련시간"] or (plan.get("훈련시간","") if plan else ""),
+                "훈련시간": (plan.get("훈련시간","") if plan else "") or c["훈련시간"],
                 "정원": 정원,
                 "확정인원": 확정,
                 "신청인원": 신청,
@@ -1126,6 +1128,7 @@ with tab_msg:
 
         styled_p = (
             df_p.style
+            .format({"모집률(%)": "{:.1f}", "신청률(%)": "{:.1f}"})
             .apply(style_msg_row, axis=1)
             .map(lambda v: "color:#e53e3e;font-weight:700" if isinstance(v,(int,float)) and v < 65 else
                            "color:#276749;font-weight:700" if isinstance(v,(int,float)) and v >= 65 else "",
