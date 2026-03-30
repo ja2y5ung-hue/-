@@ -1119,6 +1119,13 @@ with tab_msg:
         st.markdown("**📝 파싱 결과 — 셀을 클릭해 직접 수정 가능합니다**")
         edit_cols = ["보고자","계열","지점","훈련종류","과정명","시작일","종료일","훈련일수","훈련시간","정원","확정인원","신청인원","모집률(%)","신청률(%)","강의장","매칭과정명","비고"]
         df_edit = pd.DataFrame(parsed)[edit_cols].copy()
+        # 타입 명시
+        for _c in ["정원","확정인원","신청인원"]:
+            df_edit[_c] = df_edit[_c].fillna(0).astype(int)
+        for _c in ["모집률(%)","신청률(%)"]:
+            df_edit[_c] = df_edit[_c].fillna(0.0).astype(float)
+        for _c in ["보고자","계열","지점","훈련종류","과정명","시작일","종료일","훈련일수","훈련시간","강의장","매칭과정명","비고"]:
+            df_edit[_c] = df_edit[_c].fillna("").astype(str)
         # 모집률/신청률은 재계산 표시용 (편집 불가)
         edited_df = st.data_editor(
             df_edit,
@@ -1138,8 +1145,8 @@ with tab_msg:
                 "정원":      st.column_config.NumberColumn("정원",    width="small", min_value=0, step=1),
                 "확정인원":  st.column_config.NumberColumn("확정인원",width="small", min_value=0, step=1),
                 "신청인원":  st.column_config.NumberColumn("신청인원",width="small", min_value=0, step=1),
-                "모집률(%)": st.column_config.NumberColumn("모집률(%)",disabled=True, width="small", format="%.1f"),
-                "신청률(%)": st.column_config.NumberColumn("신청률(%)",disabled=True, width="small", format="%.1f"),
+                "모집률(%)": st.column_config.NumberColumn("모집률(%)", disabled=True, width="small"),
+                "신청률(%)": st.column_config.NumberColumn("신청률(%)", disabled=True, width="small"),
                 "강의장":    st.column_config.TextColumn("강의장",    width="medium"),
                 "매칭과정명":st.column_config.TextColumn("매칭과정명",disabled=True, width="large"),
                 "비고":      st.column_config.TextColumn("비고",      width="medium"),
