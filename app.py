@@ -342,10 +342,15 @@ def extract_branch_from_greeting(text):
     all_branches = sorted(set(b for bl in SERIES_BRANCHES.values() for b in bl), key=len, reverse=True)
     for ser in series_list:
         for br in all_branches:
-            if (ser + br) in text:
+            # 붙여쓰기(IT인천) 또는 공백(승무원 강남) 모두 지원
+            if (ser + br) in text or (ser + " " + br) in text:
                 return (ser, br)
     for ser in series_list:
         if ser in text and ("보고" in text or "현황" in text):
+            # 지점명 단독 추출 시도
+            for br in all_branches:
+                if br in text:
+                    return (ser, br)
             return (ser, "")
     return ("", "")
 
@@ -367,8 +372,8 @@ def parse_date_range(text_val):
     if not text_val:
         return "", ""
     t = str(text_val).strip()
-    # 4자리 연도: 2026-03-20 ~ 2026-08-21 or 2026.03.20~2026.08.21
-    m = re.search(r'(\d{4}[-./]\d{1,2}[-./]\d{1,2})\s*~\s*(\d{4}[-./]\d{1,2}[-./]\d{1,2})', t)
+    # 4자리 연도: 2026-03-20 ~ 2026-08-21 or 2026.03.20.~2026.08.21. (trailing dot 허용)
+    m = re.search(r'(\d{4}[-./]\d{1,2}[-./]\d{1,2})\.?\s*~\s*(\d{4}[-./]\d{1,2}[-./]\d{1,2})', t)
     if m:
         def norm(d): return re.sub(r'[./]', '-', d)
         return norm(m.group(1)), norm(m.group(2))
@@ -385,7 +390,7 @@ def split_course_blocks(text):
     """메신저 텍스트에서 과정 블록 분리"""
     # 훈련과정명 / 과정명 모두 지원, 앞에 - · * 숫자. [ 등 다양한 접두사 처리
     course_name_pat = r'(?:훈련\s*)?(?:과\s*정\s*명|과정명)'
-    prefix = r'(?:\d+\s*[.·]\s*|[-*·]\s*|\[\s*)?'   # 숫자., -, *, [, 없음
+    prefix = r'(?:\d+\s*[.·]\s*|[-*·▶►▷]\s*|\[\s*)?'  # 숫자., -, *, ▶, [, 없음
     pat = re.compile(
         r'(?:^|\n)\s*' + prefix + course_name_pat + r'[^:\：]*[:\：]',
         re.MULTILINE
@@ -399,48 +404,68 @@ def split_course_blocks(text):
         blocks.append(text[pos:end].strip())
     return blocks
 
+# 필드 레이블 정규화 테이블
+# 키: 정규식 패턴(띄어쓰기 무관), 값: 내부 필드명
+FIELD_LABEL_MAP = [
+    # (정규식패턴,                              내부키,       처리방식)
+    (r'(?:훈련\s*)?(?:과\s*정\s*명)',           "과정명",     "text"),
+    (r'(?:훈련\s*)?기\s*간',                    "기간",       "date"),
+    (r'훈련\s*시\s*간',                         "훈련시간",   "text"),
+    (r'훈련\s*일\s*수',                         "훈련일수_m", "text"),  # 메신저 훈련일수(참고용)
+    (r'강\s*의\s*[장실]',                       "강의장",     "text"),
+    (r'(?:모\s*집\s*인\s*원|정\s*원)',          "모집인원",   "number"),
+    (r'신\s*청\s*인\s*원',                      "신청인원",   "number"),
+    (r'확\s*정\s*인\s*원',                      "확정인원",   "number"),
+    (r'(?:HRD[^:\：]*)?신\s*청',               "신청인원",   "number"),  # HRD신청 등
+    (r'회\s*차',                                "회차",       "text"),
+]
+
+def _norm_label(label):
+    """레이블에서 공백/특수문자 제거해 정규화"""
+    return re.sub(r'[\s\(\)\[\]△▶►▷·*\-]', '', label)
+
 def parse_one_course(block):
-    """단일 과정 블록 → dict"""
-    result = {"과정명":"","시작일":"","종료일":"","훈련시간":"","강의장":"","모집인원":0,"신청인원":0,"확정인원":0}
-    for line in block.split('\n'):
-        line = line.strip().lstrip('-').lstrip('*').lstrip('·').strip()
+    """단일 과정 블록 → dict (레이블 테이블 기반, 띄어쓰기/특수문자 무관)"""
+    result = {
+        "과정명": "", "시작일": "", "종료일": "",
+        "훈련시간": "", "훈련일수_m": "", "강의장": "",
+        "모집인원": 0, "신청인원": 0, "확정인원": 0, "회차": "",
+    }
+    for raw_line in block.split('\n'):
+        # 줄 앞 접두사 제거 (▶ - * · 숫자. 등)
+        line = re.sub(r'^[\s▶►▷\-*·]+', '', raw_line).strip()
         if not line:
             continue
-        # 과정명 (훈련과정명 포함)
-        m = re.search(r'(?:훈련\s*)?(?:과\s*정\s*명|과정명)\s*[:\：]\s*(.*)', line)
-        if m:
-            name = m.group(1).strip()
-            name = re.sub(r'^\[', '', name).rstrip(']').strip()
-            result["과정명"] = name
+        # 콜론 분리: "레이블 : 값" 또는 "레이블: 값"
+        sep = re.search(r'[:\：]', line)
+        if not sep:
             continue
-        # 훈련기간 (총일수) 형식 포함
-        m = re.search(r'(?:훈련\s*기간|기\s*간)[^:\：]*[:\：]\s*(.*)', line)
-        if m:
-            s, e = parse_date_range(m.group(1))
-            result["시작일"] = s; result["종료일"] = e
+        label_raw = line[:sep.start()].strip()
+        value_raw = line[sep.end():].strip()
+        # 괄호 속 보충설명 제거 (예: "훈련기간 (총일수)")
+        label_clean = re.sub(r'\([^)]*\)', '', label_raw).strip()
+
+        matched_key = None
+        matched_type = None
+        for pat, key, typ in FIELD_LABEL_MAP:
+            if re.fullmatch(pat + r'.*', label_clean, re.IGNORECASE):
+                matched_key = key
+                matched_type = typ
+                break
+
+        if matched_key is None:
             continue
-        # 훈련시간 (1일 훈련시간/총훈련시간) 형식 포함
-        m = re.search(r'훈련\s*시간[^:\：]*[:\：]\s*(.*)', line)
-        if m:
-            result["훈련시간"] = m.group(1).strip()
-            continue
-        m = re.search(r'(?:강\s*의\s*[장실])\s*[:\：]\s*(.*)', line)
-        if m:
-            result["강의장"] = m.group(1).strip()
-            continue
-        # 정원 (모집인원 포함)
-        m = re.search(r'(?:모집\s*인원|정\s*원)\s*[:\：]\s*(.*)', line)
-        if m:
-            result["모집인원"] = extract_number(m.group(1))
-            continue
-        m = re.search(r'신청\s*인원\s*[:\：]\s*(.*)', line)
-        if m:
-            result["신청인원"] = extract_number(m.group(1))
-            continue
-        m = re.search(r'확정\s*인원\s*[:\：]\s*(.*)', line)
-        if m:
-            result["확정인원"] = extract_number(m.group(1))
-            continue
+
+        if matched_type == "text":
+            val = re.sub(r'^\[', '', value_raw).rstrip(']').strip()
+            result[matched_key] = val
+        elif matched_type == "date":
+            s, e = parse_date_range(value_raw)
+            result["시작일"] = s
+            result["종료일"] = e
+        elif matched_type == "number":
+            result[matched_key] = extract_number(value_raw)
+
     return result
 
 def fuzzy_match_plan(course_name, branch, plan_courses):
