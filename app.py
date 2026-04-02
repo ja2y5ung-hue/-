@@ -468,25 +468,42 @@ def parse_one_course(block):
 
     return result
 
-def fuzzy_match_plan(course_name, branch, plan_courses):
-    """과정명+지점으로 연간개설계획 매칭"""
+def fuzzy_match_plan(course_name, branch, plan_courses, hint_start=""):
+    """과정명+지점+시작일 힌트로 연간개설계획 매칭 (같은 과정 여러 회차 중 가장 가까운 것)"""
     if not course_name:
         return None
     def normalize(s):
-        return re.sub(r'[\s\(\)\[\]&·]', '', str(s)).lower()
+        return re.sub(r'[\s\(\)\[\]&·()\[\]]', '', str(s)).lower()
     norm_q = normalize(course_name)
     candidates = [c for c in plan_courses if branch and branch in (c.get("지점",""))] if branch else plan_courses
     if not candidates:
         candidates = plan_courses
+
+    # 1단계: 이름 점수 계산
+    scored = []
     for c in candidates:
-        if normalize(c["과정명"]) == norm_q:
-            return c
-    best, best_score = None, 0
-    for c in candidates:
-        score = difflib.SequenceMatcher(None, norm_q, normalize(c["과정명"])).ratio()
-        if score > best_score and score > 0.55:
-            best, best_score = c, score
-    return best
+        name_score = difflib.SequenceMatcher(None, norm_q, normalize(c["과정명"])).ratio()
+        if name_score < 0.55:
+            continue
+        # 2단계: 시작일 힌트가 있으면 날짜 근접도 가산점
+        date_bonus = 0
+        if hint_start:
+            plan_start = str(c.get("시작일",""))[:7]   # YYYY-MM
+            hint_ym    = str(hint_start)[:7]
+            if plan_start and hint_ym and plan_start == hint_ym:
+                date_bonus = 0.3
+            elif plan_start and hint_ym and plan_start[:4] == hint_ym[:4]:
+                try:
+                    diff = abs(int(plan_start[5:7]) - int(hint_ym[5:7]))
+                    date_bonus = max(0, 0.2 - diff * 0.03)
+                except Exception:
+                    pass
+        scored.append((name_score + date_bonus, c))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1]
 
 def parse_messenger_all(text, staff_map, plan_courses):
     """전체 메신저 텍스트 파싱 → 과정 데이터 리스트"""
@@ -510,7 +527,7 @@ def parse_messenger_all(text, staff_map, plan_courses):
             c = parse_one_course(cb)
             if not c["과정명"]:
                 continue
-            plan = fuzzy_match_plan(c["과정명"], 지점, plan_courses)
+            plan = fuzzy_match_plan(c["과정명"], 지점, plan_courses, hint_start=c["시작일"])
             # 연간개설계획 데이터 우선, 없을 때만 메신저 값 사용
             plan_정원 = int(plan.get("정원",0) or 0) if plan else 0
             정원 = plan_정원 or c["모집인원"]
@@ -1276,126 +1293,259 @@ with tab_msg:
 # TAB 2 : 모집현황 조회
 # ══════════════════════════════════════════════
 with tab2:
-    recs = [v for v in db.values() if v.get("개설상태","미입력") not in ("","미입력")]
+    t2_sub1, t2_sub2 = st.tabs(["📊 모집현황 조회", "📌 계획 대비 운영 점검"])
 
-    if not recs:
-        st.info("저장된 모집현황이 없습니다. '모집현황 입력' 탭에서 먼저 데이터를 입력하세요.")
-    else:
-        # 월별 필터 (훈련시작일 기준)
-        def get_month(r):
-            s = str(r.get("시작일",""))
-            return s[:7] if len(s) >= 7 else "미정"
-        month_set = sorted(set(get_month(r) for r in recs))
-        month_labels = {m: (f"{int(m[5:7])}월" if len(m) >= 7 and m[5:7].isdigit() else m) for m in month_set}
-        sel_month = st.radio(
-            "훈련시작 월", ["전체"] + month_set,
-            format_func=lambda x: "전체" if x == "전체" else month_labels.get(x, x),
-            horizontal=True,
-        )
-        recs = recs if sel_month == "전체" else [r for r in recs if get_month(r) == sel_month]
+    # ── 서브탭1: 기존 모집현황 조회 ──────────────
+    with t2_sub1:
+        recs = [v for v in db.values() if v.get("개설상태","미입력") not in ("","미입력")]
+        if not recs:
+            st.info("저장된 모집현황이 없습니다.")
+        else:
+            # 월별 필터 (훈련시작일 기준)
+            def get_month(r):
+                s = str(r.get("시작일",""))
+                return s[:7] if len(s) >= 7 else "미정"
+            month_set = sorted(set(get_month(r) for r in recs))
+            month_labels = {m: (f"{int(m[5:7])}월" if len(m)>=7 and m[5:7].isdigit() else m) for m in month_set}
+            sel_month = st.radio(
+                "훈련시작 월", ["전체"] + month_set,
+                format_func=lambda x: "전체" if x=="전체" else month_labels.get(x,x),
+                horizontal=True,
+            )
+            recs = recs if sel_month=="전체" else [r for r in recs if get_month(r)==sel_month]
 
-        fc1, fc2, fc3, fc4 = st.columns(4)
-        with fc1: sf2 = st.multiselect("계열", sorted(set(r.get("계열","") for r in recs)))
-        with fc2: bf2 = st.multiselect("지점", sorted(set(r.get("지점","") for r in recs)))
-        with fc3: stf = st.multiselect("개설상태", ["준비중","개강확정","개강연기","폐강"],
-                                        default=["준비중","개강확정","개강연기","폐강"])
-        with fc4: warn_only = st.checkbox("경고 과정만")
+            fc1, fc2, fc3, fc4 = st.columns(4)
+            with fc1: sf2 = st.multiselect("계열", sorted(set(r.get("계열","") for r in recs)))
+            with fc2: bf2 = st.multiselect("지점", sorted(set(r.get("지점","") for r in recs)))
+            with fc3: stf = st.multiselect("개설상태", ["준비중","개강확정","개강연기","폐강"],
+                                            default=["준비중","개강확정","개강연기","폐강"])
+            with fc4: warn_only = st.checkbox("경고 과정만")
 
-        filtered = [
-            r for r in recs
-            if (not sf2 or r.get("계열") in sf2)
-            and (not bf2 or r.get("지점") in bf2)
-            and r.get("개설상태") in stf
-        ]
-        if warn_only:
             filtered = [
-                r for r in filtered
-                if r.get("개설상태") == "개강확정"
-                and (float(r.get("모집률",1) or 1) < 0.65
-                     or float(r.get("신청률",1) or 1) < 0.70)
+                r for r in recs
+                if (not sf2 or r.get("계열") in sf2)
+                and (not bf2 or r.get("지점") in bf2)
+                and r.get("개설상태") in stf
             ]
+            if warn_only:
+                filtered = [
+                    r for r in filtered
+                    if r.get("개설상태") == "개강확정"
+                    and (float(r.get("모집률",1) or 1) < 0.65
+                         or float(r.get("신청률",1) or 1) < 0.70)
+                ]
 
-        # 요약 KPI
-        개설 = [r for r in filtered if r.get("개설상태") == "개강확정"]
-        경고 = [r for r in 개설
-                if float(r.get("모집률",1) or 1) < 0.65
-                or float(r.get("신청률",1) or 1) < 0.70]
-        연기 = [r for r in filtered if r.get("개설상태") == "개강연기"]
-        폐강 = [r for r in filtered if r.get("개설상태") == "폐강"]
+            개설 = [r for r in filtered if r.get("개설상태") == "개강확정"]
+            경고 = [r for r in 개설
+                    if float(r.get("모집률",1) or 1) < 0.65
+                    or float(r.get("신청률",1) or 1) < 0.70]
+            연기 = [r for r in filtered if r.get("개설상태") == "개강연기"]
+            폐강 = [r for r in filtered if r.get("개설상태") == "폐강"]
 
-        mc = st.columns(5)
+            mc = st.columns(5)
+            for col, num, lbl, clr in [
+                (mc[0], len(filtered), "전체",    "#2b6cb0"),
+                (mc[1], len(개설),     "개강확정", "#276749"),
+                (mc[2], len(경고),     "모집경고", "#e53e3e"),
+                (mc[3], len(연기),     "개강연기", "#c05621"),
+                (mc[4], len(폐강),     "폐강",     "#718096"),
+            ]:
+                with col:
+                    st.markdown(
+                        f'<div class="kpi-box"><div class="kpi-num" style="color:{clr};font-size:1.4rem">{num}</div>'
+                        f'<div class="kpi-label">{lbl}</div></div>',
+                        unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            rows = []
+            for r in filtered:
+                mp = float(r.get("모집률", 0) or 0) * 100
+                sp = float(r.get("신청률", 0) or 0) * 100
+                rows.append({
+                    "계열": r.get("계열",""), "지점": r.get("지점",""),
+                    "훈련종류": r.get("훈련종류",""), "과정명": r.get("과정명",""),
+                    "기준주차": r.get("기준주차",""),
+                    "정원": int(r.get("정원",0) or 0),
+                    "확정": int(r.get("확정인원",0) or 0),
+                    "신청": int(r.get("신청인원",0) or 0),
+                    "모집률(%)": round(mp, 1), "신청률(%)": round(sp, 1),
+                    "개설상태": r.get("개설상태",""),
+                    "연기사유": r.get("연기사유",""), "비고": r.get("모집비고",""),
+                })
+            df = pd.DataFrame(rows)
+
+            def style_row(row):
+                s = row["개설상태"]
+                if s == "준비중":  return ["color:#718096;background:#f0f4f8"]*len(row)
+                if s == "폐강":    return ["color:#aaa;background:#f7fafc"]*len(row)
+                if s == "개강연기": return ["background:#fffbeb"]*len(row)
+                if s == "개강확정" and (row["모집률(%)"]<65 or row["신청률(%)"]<70):
+                    return ["background:#fff5f5;color:#c53030"]*len(row)
+                return [""]*len(row)
+
+            styled = (
+                df.style
+                .format({"모집률(%)":"{:.1f}","신청률(%)":"{:.1f}"})
+                .apply(style_row, axis=1)
+                .map(lambda v: "color:#e53e3e;font-weight:700" if isinstance(v,(int,float)) and v<65 else
+                               "color:#276749;font-weight:700" if isinstance(v,(int,float)) and v>=65 else "",
+                     subset=["모집률(%)"])
+                .map(lambda v: "color:#e53e3e;font-weight:700" if isinstance(v,(int,float)) and v<70 else
+                               "color:#276749;font-weight:700" if isinstance(v,(int,float)) and v>=70 else "",
+                     subset=["신청률(%)"])
+            )
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            if 경고:
+                st.markdown(f"**⚠️ 모집경고 과정 {len(경고)}건**")
+                for r in 경고:
+                    mp = float(r.get("모집률",0) or 0) * 100
+                    sp = float(r.get("신청률",0) or 0) * 100
+                    st.error(
+                        f"**{r.get('과정명','')}** ({r.get('지점','')})  |  "
+                        f"확정 {r.get('확정인원',0)}/{r.get('정원',0)}명  |  "
+                        f"모집률 **{mp:.1f}%**  신청률 **{sp:.1f}%**"
+                        + (f"  |  비고: {r.get('모집비고','')}" if r.get("모집비고") else "")
+                    )
+
+    # ── 서브탭2: 계획 대비 운영 점검 ─────────────
+    with t2_sub2:
+        today_dt = datetime.now().date()
+        check_rows = []
+        for c in courses:
+            k = course_key(c["지점"], c["과정명"], c.get("운영회차","1"))
+            rec = db.get(k)
+            상태 = rec.get("개설상태","") if rec else ""
+            확정 = int(rec.get("확정인원",0) or 0) if rec else 0
+            신청 = int(rec.get("신청인원",0) or 0) if rec else 0
+            정원 = int(c.get("정원",0) or 0)
+            모집률 = round(확정/정원*100,1) if 정원>0 else 0
+            try:
+                start_dt = datetime.strptime(str(c["시작일"])[:10], "%Y-%m-%d").date()
+            except Exception:
+                start_dt = None
+            if rec and 상태:
+                점검상태 = 상태
+            elif start_dt and start_dt <= today_dt:
+                점검상태 = "⚠️ 시작일 경과·미등록"
+            else:
+                점검상태 = "❓ 미등록"
+            check_rows.append({
+                "계열": c["계열"], "지점": c["지점"], "훈련종류": c["훈련종류"],
+                "과정명": c["과정명"], "회차": c.get("운영회차","1"),
+                "시작일": c["시작일"], "종료일": c["종료일"],
+                "정원": 정원, "확정인원": 확정, "신청인원": 신청,
+                "모집률(%)": 모집률, "점검상태": 점검상태, "진행상태": c["진행상태"],
+            })
+
+        total_plan     = len(check_rows)
+        cnt_확정       = sum(1 for r in check_rows if r["점검상태"] == "개강확정")
+        cnt_미등록     = sum(1 for r in check_rows if r["점검상태"] == "❓ 미등록")
+        cnt_경과미등록 = sum(1 for r in check_rows if r["점검상태"] == "⚠️ 시작일 경과·미등록")
+        운영률_pct     = round(cnt_확정/total_plan*100, 1) if total_plan > 0 else 0
+
+        kc2 = st.columns(5)
         for col, num, lbl, clr in [
-            (mc[0], len(filtered), "전체",    "#2b6cb0"),
-            (mc[1], len(개설),     "개강확정", "#276749"),
-            (mc[2], len(경고),     "모집경고", "#e53e3e"),
-            (mc[3], len(연기),     "개강연기", "#c05621"),
-            (mc[4], len(폐강),     "폐강",     "#718096"),
+            (kc2[0], total_plan,       "계획 과정 수",         "#2b6cb0"),
+            (kc2[1], cnt_확정,         "✅ 개강확정",           "#276749"),
+            (kc2[2], f"{운영률_pct}%", "운영률(확정/계획)",     "#276749" if 운영률_pct>=70 else "#e53e3e"),
+            (kc2[3], cnt_경과미등록,   "⚠️ 시작일 경과·미등록", "#e53e3e"),
+            (kc2[4], cnt_미등록,       "❓ 미등록(예정)",        "#718096"),
         ]:
             with col:
                 st.markdown(
-                    f'<div class="kpi-box"><div class="kpi-num" style="color:{clr};font-size:1.4rem">{num}</div>'
-                    f'<div class="kpi-label">{lbl}</div></div>',
-                    unsafe_allow_html=True,
-                )
+                    f'<div class="kpi-box"><div class="kpi-num" style="color:{clr};font-size:1.3rem">{num}</div>'
+                    f'<div class="kpi-label">{lbl}</div></div>', unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 테이블 (pandas styler)
-        rows = []
-        for r in filtered:
-            mp = float(r.get("모집률", 0) or 0) * 100
-            sp = float(r.get("신청률", 0) or 0) * 100
-            rows.append({
-                "계열":      r.get("계열",""),
-                "지점":      r.get("지점",""),
-                "훈련종류":  r.get("훈련종류",""),
-                "과정명":    r.get("과정명",""),
-                "기준주차":  r.get("기준주차",""),
-                "정원":      int(r.get("정원",0) or 0),
-                "확정":      int(r.get("확정인원",0) or 0),
-                "신청":      int(r.get("신청인원",0) or 0),
-                "모집률(%)": round(mp, 1),
-                "신청률(%)": round(sp, 1),
-                "개설상태":  r.get("개설상태",""),
-                "연기사유":  r.get("연기사유",""),
-                "비고":      r.get("모집비고",""),
-            })
+        # 필터
+        cf1, cf2, cf3, cf4 = st.columns(4)
+        chk_ser_opt = ["전체"] + sorted(set(r["계열"] for r in check_rows if r["계열"]))
+        chk_br_opt  = ["전체"] + sorted(set(r["지점"] for r in check_rows if r["지점"]))
+        chk_st_opt  = ["전체","개강확정","개강연기","폐강","준비중","❓ 미등록","⚠️ 시작일 경과·미등록"]
+        chk_pg_opt  = ["전체","진행중","예정","종료"]
+        sel_c_ser = cf1.selectbox("계열",    chk_ser_opt, key="chk_ser")
+        sel_c_br  = cf2.selectbox("지점",    chk_br_opt,  key="chk_br")
+        sel_c_st  = cf3.selectbox("점검상태", chk_st_opt, key="chk_st")
+        sel_c_pg  = cf4.selectbox("진행상태", chk_pg_opt, key="chk_pg")
 
-        df = pd.DataFrame(rows)
+        fc = check_rows
+        if sel_c_ser != "전체": fc = [r for r in fc if r["계열"]    == sel_c_ser]
+        if sel_c_br  != "전체": fc = [r for r in fc if r["지점"]    == sel_c_br]
+        if sel_c_st  != "전체": fc = [r for r in fc if r["점검상태"] == sel_c_st]
+        if sel_c_pg  != "전체": fc = [r for r in fc if r["진행상태"] == sel_c_pg]
+        st.markdown(f"**{len(fc)}건** 표시 중")
 
-        def style_row(row):
-            s = row["개설상태"]
-            if s == "준비중":
-                return ["color:#718096;background:#f0f4f8"] * len(row)
-            if s == "폐강":
-                return ["color:#aaa;background:#f7fafc"] * len(row)
-            if s == "개강연기":
-                return ["background:#fffbeb"] * len(row)
-            if s == "개강확정" and (row["모집률(%)"] < 65 or row["신청률(%)"] < 70):
-                return ["background:#fff5f5;color:#c53030"] * len(row)
-            return [""] * len(row)
+        # 계열·지점별 요약
+        with st.expander("📊 계열·지점별 운영률 요약", expanded=True):
+            sm = {}
+            for r in check_rows:
+                key2 = (r["계열"], r["지점"])
+                if key2 not in sm:
+                    sm[key2] = {"계획":0,"확정":0,"미등록":0,"경과미등록":0,"연기":0,"폐강":0}
+                sm[key2]["계획"] += 1
+                s2 = r["점검상태"]
+                if s2 == "개강확정":                   sm[key2]["확정"] += 1
+                elif s2 == "❓ 미등록":                 sm[key2]["미등록"] += 1
+                elif s2 == "⚠️ 시작일 경과·미등록":    sm[key2]["경과미등록"] += 1
+                elif s2 == "개강연기":                  sm[key2]["연기"] += 1
+                elif s2 == "폐강":                      sm[key2]["폐강"] += 1
+            sum_rows2 = []
+            for (ser, br), v in sorted(sm.items()):
+                율2 = round(v["확정"]/v["계획"]*100,1) if v["계획"]>0 else 0
+                sum_rows2.append({
+                    "계열": ser, "지점": br, "계획": v["계획"], "개강확정": v["확정"],
+                    "운영률(%)": 율2, "⚠️경과미등록": v["경과미등록"],
+                    "❓미등록": v["미등록"], "개강연기": v["연기"], "폐강": v["폐강"],
+                })
+            def _style_sum(row):
+                if row.get("⚠️경과미등록",0) > 0: return ["background:#fff5f5"]*len(row)
+                if row.get("운영률(%)",0) >= 80:   return ["background:#f0fff4"]*len(row)
+                return [""]*len(row)
+            st.dataframe(
+                pd.DataFrame(sum_rows2).style
+                .format({"운영률(%)":"{:.1f}"})
+                .apply(_style_sum, axis=1)
+                .map(lambda v: "color:#e53e3e;font-weight:700" if isinstance(v,float) and v<60 else
+                               "color:#276749;font-weight:700" if isinstance(v,float) and v>=80 else "",
+                     subset=["운영률(%)"]),
+                use_container_width=True, hide_index=True)
 
-        styled = (
-            df.style
-            .apply(style_row, axis=1)
-            .map(lambda v: "color:#e53e3e;font-weight:700" if v < 65 else
-                           "color:#276749;font-weight:700", subset=["모집률(%)"])
-            .map(lambda v: "color:#e53e3e;font-weight:700" if v < 70 else
-                           "color:#276749;font-weight:700", subset=["신청률(%)"])
-        )
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        # 과정별 상세
+        st.markdown("**과정별 점검 상세**")
+        if fc:
+            def _style_chk(row):
+                s3 = row.get("점검상태","")
+                if s3 == "⚠️ 시작일 경과·미등록": return ["background:#fff5f5;color:#c53030"]*len(row)
+                if s3 == "개강확정":
+                    return ["background:#fffbeb"]*len(row) if row.get("모집률(%)",0)<65 else ["background:#f0fff4"]*len(row)
+                if s3 in ("개강연기","폐강"): return ["background:#fffbeb;color:#744210"]*len(row)
+                return [""]*len(row)
+            st.dataframe(
+                pd.DataFrame(fc)[["계열","지점","훈련종류","과정명","회차","시작일","종료일",
+                                   "정원","확정인원","신청인원","모집률(%)","점검상태","진행상태"]]
+                .style.format({"모집률(%)":"{:.1f}"}).apply(_style_chk, axis=1),
+                use_container_width=True, hide_index=True)
+        else:
+            st.info("해당 조건의 과정이 없습니다.")
 
-        # 경고 과정 하이라이트
-        if 경고:
-            st.markdown(f"**⚠️ 모집경고 과정 {len(경고)}건**")
-            for r in 경고:
-                mp = float(r.get("모집률",0) or 0) * 100
-                sp = float(r.get("신청률",0) or 0) * 100
-                st.error(
-                    f"**{r.get('과정명','')}** ({r.get('지점','')})  |  "
-                    f"확정 {r.get('확정인원',0)}/{r.get('정원',0)}명  |  "
-                    f"모집률 **{mp:.1f}%**  신청률 **{sp:.1f}%**"
-                    + (f"  |  비고: {r.get('모집비고','')}" if r.get("모집비고") else "")
-                )
+        # 월별 계획 vs 개강확정
+        st.markdown("---")
+        st.markdown("**📅 월별 계획 vs 개강확정**")
+        mon_map = {}
+        for r in check_rows:
+            mon = str(r["시작일"])[:7]
+            if not mon: continue
+            if mon not in mon_map:
+                mon_map[mon] = {"계획":0,"개강확정":0,"⚠️경과미등록":0}
+            mon_map[mon]["계획"] += 1
+            if r["점검상태"] == "개강확정":               mon_map[mon]["개강확정"] += 1
+            elif r["점검상태"] == "⚠️ 시작일 경과·미등록": mon_map[mon]["⚠️경과미등록"] += 1
+        mon_rows2 = [{"월":k,**v,"개강률(%)":round(v["개강확정"]/v["계획"]*100,1) if v["계획"]>0 else 0}
+                     for k,v in sorted(mon_map.items())]
+        if mon_rows2:
+            st.dataframe(pd.DataFrame(mon_rows2).style.format({"개강률(%)":"{:.1f}"}),
+                         use_container_width=True, hide_index=True)
 
 # ══════════════════════════════════════════════
 # TAB 3 : 과정 추적 관리
