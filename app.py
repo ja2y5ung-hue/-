@@ -374,8 +374,9 @@ def parse_date_range(text_val):
     t = str(text_val).strip()
     # 숫자 사이 공백 정리 (예: "2027.02. 11" → "2027.02.11")
     t = re.sub(r'(\d{4}[-./]\d{1,2}[-./])\s+(\d{1,2})', r'\1\2', t)
-    # 4자리 연도: 2026-03-20 ~ 2026-08-21 or 2026.03.20.~2026.08.21. (trailing dot 허용)
-    m = re.search(r'(\d{4}[-./]\d{1,2}[-./]\d{1,2})\.?\s*~\s*(\d{4}[-./]\d{1,2}[-./]\d{1,2})', t)
+    # 4자리 연도: ~ 또는 - 구분자 모두 허용, trailing dot 허용
+    # 단 YYYY.MM.DD-YYYY 처럼 점 구분 날짜 사이 하이픈인 경우만 허용
+    m = re.search(r'(\d{4}[-./]\d{1,2}[-./]\d{1,2})\.?\s*[~\-]\s*(\d{4}[-./]\d{1,2}[-./]\d{1,2})', t)
     if m:
         def norm(d): return re.sub(r'[./]', '-', d)
         return norm(m.group(1)), norm(m.group(2))
@@ -399,7 +400,8 @@ def split_course_blocks(text):
     )
     positions = [m.start() for m in pat.finditer(text)]
     if not positions:
-        return []
+        # 과정명 레이블이 없는 형식 → 전체를 하나의 블록으로 처리
+        return [text.strip()] if text.strip() else []
     blocks = []
     for i, pos in enumerate(positions):
         end = positions[i+1] if i+1 < len(positions) else len(text)
@@ -435,12 +437,18 @@ def parse_one_course(block):
     }
     for raw_line in block.split('\n'):
         # 줄 앞 접두사 제거 (▶ - * · 숫자. 등)
-        line = re.sub(r'^[\s▶►▷\-*·]+', '', raw_line).strip()
+        line = re.sub(r'^[\s▶►▷\-*·\[]+', '', raw_line).strip()
         if not line:
             continue
         # 콜론 분리: "레이블 : 값" 또는 "레이블: 값"
         sep = re.search(r'[:\：]', line)
         if not sep:
+            # 콜론 없는 줄 → 과정명 후보 (아직 과정명 없을 때, 충분히 긴 줄)
+            if not result["과정명"] and len(line) >= 8:
+                candidate = re.sub(r'^\([^)]*\)\s*', '', line).strip()  # 앞 괄호분류 제거
+                candidate = re.sub(r'[\[\]]', '', candidate).strip()
+                if candidate:
+                    result["과정명"] = candidate
             continue
         label_raw = line[:sep.start()].strip()
         value_raw = line[sep.end():].strip()
