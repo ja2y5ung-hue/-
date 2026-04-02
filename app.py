@@ -372,6 +372,8 @@ def parse_date_range(text_val):
     if not text_val:
         return "", ""
     t = str(text_val).strip()
+    # 숫자 사이 공백 정리 (예: "2027.02. 11" → "2027.02.11")
+    t = re.sub(r'(\d{4}[-./]\d{1,2}[-./])\s+(\d{1,2})', r'\1\2', t)
     # 4자리 연도: 2026-03-20 ~ 2026-08-21 or 2026.03.20.~2026.08.21. (trailing dot 허용)
     m = re.search(r'(\d{4}[-./]\d{1,2}[-./]\d{1,2})\.?\s*~\s*(\d{4}[-./]\d{1,2}[-./]\d{1,2})', t)
     if m:
@@ -442,8 +444,9 @@ def parse_one_course(block):
             continue
         label_raw = line[:sep.start()].strip()
         value_raw = line[sep.end():].strip()
-        # 괄호 속 보충설명 제거 (예: "훈련기간 (총일수)")
+        # 괄호 속 보충설명 제거 (예: "훈련기간 (총일수)"), [ ] 등 특수문자 제거
         label_clean = re.sub(r'\([^)]*\)', '', label_raw).strip()
+        label_clean = re.sub(r'[\[\]▶►▷【】]', '', label_clean).strip()
 
         matched_key = None
         matched_type = None
@@ -1224,6 +1227,62 @@ with tab_msg:
             })
         st.session_state["parsed_results"] = new_parsed
         parsed = new_parsed
+
+        # ── 수동 매칭 UI (매칭과정명이 비어있는 행) ───────
+        unmatched = [(i, r) for i, r in enumerate(parsed) if not r.get("매칭과정명","").strip()]
+        if unmatched:
+            with st.expander(f"⚠️ 연간계획 미매칭 과정 {len(unmatched)}건 — 수동 연결", expanded=True):
+                st.caption("아래에서 연간계획 과정을 직접 선택하면 시작일·종료일·훈련일수·훈련시간·정원이 자동으로 채워집니다.")
+                # 연간계획 선택지 구성
+                plan_options = {
+                    f"{c['지점']} | {c['과정명']} ({c['시작일'][:7]})": c
+                    for c in courses
+                }
+                plan_labels = ["— 선택 안 함 —"] + list(plan_options.keys())
+                changed = False
+                for idx, r in unmatched:
+                    # 지점으로 사전 필터링된 선택지
+                    지점 = r.get("지점","")
+                    filtered_labels = ["— 선택 안 함 —"] + [
+                        lbl for lbl in plan_options
+                        if not 지점 or lbl.startswith(지점)
+                    ]
+                    if len(filtered_labels) == 1:
+                        filtered_labels = plan_labels  # 지점 필터 결과 없으면 전체
+
+                    col_a, col_b = st.columns([2, 3])
+                    with col_a:
+                        st.markdown(f"**{r.get('보고자','')}** · `{r.get('과정명','')}`")
+                    with col_b:
+                        sel = st.selectbox(
+                            "연간계획 과정 선택",
+                            filtered_labels,
+                            key=f"manual_match_{idx}",
+                            label_visibility="collapsed",
+                        )
+                    if sel and sel != "— 선택 안 함 —":
+                        plan_c = plan_options.get(sel)
+                        if plan_c:
+                            정원_m = int(plan_c.get("정원",0) or 0)
+                            확정_m = int(parsed[idx].get("확정인원",0) or 0)
+                            신청_m = int(parsed[idx].get("신청인원",0) or 0)
+                            parsed[idx].update({
+                                "과정명":    plan_c["과정명"],
+                                "계열":      plan_c["계열"],
+                                "훈련종류":  plan_c["훈련종류"],
+                                "시작일":    plan_c["시작일"],
+                                "종료일":    plan_c["종료일"],
+                                "훈련일수":  str(plan_c.get("훈련일수","")),
+                                "훈련시간":  str(plan_c.get("훈련시간","")),
+                                "정원":      정원_m,
+                                "모집률(%)": round(확정_m/정원_m*100,1) if 정원_m>0 else 0,
+                                "신청률(%)": round(신청_m/정원_m*100,1) if 정원_m>0 else 0,
+                                "매칭과정명": plan_c["과정명"],
+                            })
+                            changed = True
+                if changed:
+                    st.session_state["parsed_results"] = parsed
+                    st.rerun()
 
         st.markdown("---")
         save_col, dl_col = st.columns(2)
