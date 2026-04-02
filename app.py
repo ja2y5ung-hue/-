@@ -443,10 +443,18 @@ def parse_one_course(block):
         # 콜론 분리: "레이블 : 값" 또는 "레이블: 값"
         sep = re.search(r'[:\：]', line)
         if not sep:
-            # 콜론 없는 줄 → 과정명 후보 (아직 과정명 없을 때, 충분히 긴 줄)
-            if not result["과정명"] and len(line) >= 8:
-                candidate = re.sub(r'^\([^)]*\)\s*', '', line).strip()  # 앞 괄호분류 제거
-                candidate = re.sub(r'[\[\]]', '', candidate).strip()
+            # 콜론 없는 줄 → 과정명 후보
+            # 인사말/헤더 제외: 과정명 키워드로 끝나는 줄만 인정
+            COURSE_END = re.compile(
+                r'(?:양성\s*과정|개발자\s*과정|자격증\s*과정|전문가\s*과정|디자이너\s*과정|'
+                r'운용사\s*과정|설계사\s*과정|기능사\s*과정|실무\s*과정|취업\s*과정|과정)$'
+            )
+            if not result["과정명"] and COURSE_END.search(line):
+                candidate = line
+                candidate = re.sub(r'^\[[^\]]*\]\s*', '', candidate)   # [5월] 제거
+                candidate = re.sub(r'^[가-힣]{1,4}\)\s*', '', candidate) # 국기) 계좌) 제거
+                candidate = re.sub(r'^\([^)]+\)\s*', '', candidate)     # (국기) (빅데이터전문가) 제거
+                candidate = candidate.strip()
                 if candidate:
                     result["과정명"] = candidate
             continue
